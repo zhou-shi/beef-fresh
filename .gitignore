@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Next.js & Node
+node_modules/
+web/node_modules/
+web/.next/
+web/out/
+web/*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Large reference archives & local runtime snapshots
+references/
+data/*.json
+
+# OS & logs
+.DS_Store
+Thumbs.db
+*.log
