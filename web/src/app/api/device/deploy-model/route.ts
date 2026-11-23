@@ -19,15 +19,23 @@ const FIRMWARE_DIR = path.join(ROOT_DIR, "firmware", "beef_fresh_esp32");
 const HEADER_PATH = path.join(FIRMWARE_DIR, "dataset_model.h");
 
 function findArduinoCli(): string {
-  const candidates = [
-    path.join(process.env.HOME || "/home/surya-asi", ".local", "bin", "arduino-cli"),
-    "/usr/local/bin/arduino-cli",
-    "/usr/bin/arduino-cli",
-  ];
+  const isWin = process.platform === "win32";
+  const candidates = isWin
+    ? [
+        path.join(process.env.LOCALAPPDATA || "", "Programs", "arduino-cli", "arduino-cli.exe"),
+        path.join(process.env.USERPROFILE || "", ".local", "bin", "arduino-cli.exe"),
+        "C:\\Program Files\\Arduino CLI\\arduino-cli.exe",
+        "C:\\arduino-cli\\arduino-cli.exe",
+      ]
+    : [
+        path.join(process.env.HOME || "/home/surya-asi", ".local", "bin", "arduino-cli"),
+        "/usr/local/bin/arduino-cli",
+        "/usr/bin/arduino-cli",
+      ];
   for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+    if (c && fs.existsSync(/*turbopackIgnore: true*/ c)) return c;
   }
-  return "arduino-cli";
+  return isWin ? "arduino-cli.exe" : "arduino-cli";
 }
 
 /**
@@ -57,8 +65,10 @@ export async function POST() {
         send({ step: 1, percent: 12, message: "Menyiapkan dan menulis file dataset_model.h dari dataset aktif" });
         const ports = listAvailableUsbPorts();
         targetPort = getActiveSerialPort() ?? ports[0] ?? null;
-        if (!targetPort || !fs.existsSync(targetPort)) {
-          throw new Error("ESP32 tidak terdeteksi di port USB (/dev/ttyUSB* atau /dev/ttyACM*). Colokkan kabel USB terlebih dahulu.");
+        const isWinPort = targetPort ? /^COM\d+$/i.test(targetPort) : false;
+        const portExists = Boolean(targetPort && (isWinPort ? ports.includes(targetPort.toUpperCase()) : fs.existsSync(/*turbopackIgnore: true*/ targetPort)));
+        if (!targetPort || !portExists) {
+          throw new Error("ESP32 tidak terdeteksi di port USB (COM* di Windows atau /dev/ttyUSB* di Linux). Colokkan kabel USB terlebih dahulu.");
         }
 
         const header = await buildDatasetHeader();
@@ -89,8 +99,10 @@ export async function POST() {
           maxBuffer: 10 * 1024 * 1024,
         });
 
-        // Matikan HUPCL agar koneksi ulang tidak mereset ESP32
-        await execFileAsync("stty", ["-F", targetPort, "-hupcl"]).catch(() => {});
+        // Matikan HUPCL di Linux agar koneksi ulang tidak mereset ESP32
+        if (process.platform === "linux") {
+          await execFileAsync("stty", ["-F", targetPort, "-hupcl"]).catch(() => {});
+        }
 
         // Tahap 5: Sambungkan ulang serial & sinkronkan OLED
         send({ step: 5, percent: 92, message: "Menyambungkan ulang ESP32 dan menyinkronkan layar OLED" });

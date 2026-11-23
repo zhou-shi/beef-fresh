@@ -234,7 +234,7 @@ export default function DeviceView() {
 
       <Card
         title="Koneksi USB Serial ESP32"
-        subtitle="Deteksi otomatis port USB (/dev/ttyUSB* atau /dev/ttyACM*) dan hubungkan ulang setelah kabel dicabut-pasang"
+        subtitle="Deteksi otomatis port USB (COM* di Windows atau /dev/ttyUSB* di Linux) dan hubungkan ulang setelah kabel dicabut-pasang"
         icon={<Usb className="h-4 w-4" />}
         actions={
           <Badge tone={d?.usbPort ? "ok" : "neutral"}>

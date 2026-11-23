@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "child_process";
 import fs from "fs";
 import path from "path";
 import type { DeviceCommand } from "@/db/schema";
@@ -7,9 +7,43 @@ import { OLED } from "@/lib/device-visual";
 import { getCounts } from "./core";
 import { processResult, simulateReading, type DeviceResultBody } from "./process";
 
+const IS_WIN = process.platform === "win32";
 const ROOT_DIR = path.resolve(process.cwd(), "..");
 const DAEMON_SCRIPT = path.join(ROOT_DIR, "cli", "serial_daemon.py");
-const SERIAL_PORT = process.env.SERIAL_PORT || "/dev/ttyUSB0";
+const SERIAL_PORT = process.env.SERIAL_PORT || (IS_WIN ? "COM3" : "/dev/ttyUSB0");
+
+let cachedPythonCmd: { cmd: string; prefixArgs: string[] } | null = null;
+
+function findPythonCommand(): { cmd: string; prefixArgs: string[] } {
+  if (cachedPythonCmd) return cachedPythonCmd;
+  const candidates: Array<{ cmd: string; prefixArgs: string[] }> = [];
+  if (process.env.PYTHON_BIN) candidates.push({ cmd: process.env.PYTHON_BIN, prefixArgs: [] });
+  if (IS_WIN) {
+    candidates.push(
+      { cmd: "python", prefixArgs: [] },
+      { cmd: "py", prefixArgs: ["-3"] },
+      { cmd: "python3", prefixArgs: [] },
+    );
+  } else {
+    candidates.push(
+      { cmd: "python3", prefixArgs: [] },
+      { cmd: "python", prefixArgs: [] },
+    );
+  }
+  for (const c of candidates) {
+    try {
+      const res = spawnSync(c.cmd, [...c.prefixArgs, "--version"], { stdio: "ignore", timeout: 2500 });
+      if (res.status === 0) {
+        cachedPythonCmd = c;
+        return c;
+      }
+    } catch {
+      // coba kandidat berikutnya
+    }
+  }
+  cachedPythonCmd = IS_WIN ? { cmd: "python", prefixArgs: [] } : { cmd: "python3", prefixArgs: [] };
+  return cachedPythonCmd;
+}
 
 const CLASS_ID: Record<Label, number> = {
   segar: 0,
@@ -105,10 +139,30 @@ export function isFlashingInProgress(): boolean {
 }
 
 export function listAvailableUsbPorts(): string[] {
+  if (IS_WIN) {
+    try {
+      // Query registry Windows untuk semua port COM aktif (cepat, ~15ms, tanpa izin admin)
+      const out = execFileSync("reg", ["query", "HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM"], {
+        encoding: "utf-8",
+        timeout: 2500,
+        windowsHide: true,
+      });
+      const matches = out.match(/\bCOM\d+\b/gi) ?? [];
+      const unique = Array.from(new Set(matches.map((m) => m.toUpperCase()))).sort((a, b) => {
+        const na = Number(a.slice(3));
+        const nb = Number(b.slice(3));
+        return na - nb;
+      });
+      return unique;
+    } catch {
+      return [];
+    }
+  }
   try {
+    const pattern = process.platform === "darwin" ? /^cu\.(usb|SLAB|wchusb)/i : /^tty(USB|ACM)\d+$/;
     return fs
       .readdirSync("/dev")
-      .filter((name) => /^tty(USB|ACM)\d+$/.test(name))
+      .filter((name) => pattern.test(name))
       .sort()
       .map((name) => `/dev/${name}`);
   } catch {
@@ -143,11 +197,18 @@ function getWorker(): WorkerState | null {
     return gSerial.__beefSerialWorker;
   }
   try {
-    const proc = spawn("python3", ["-u", DAEMON_SCRIPT], {
+    const py = findPythonCommand();
+    const proc = spawn(py.cmd, [...py.prefixArgs, "-u", DAEMON_SCRIPT], {
       env: { ...process.env, SERIAL_PORT },
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     const state: WorkerState = { proc, buf: "", seq: 0, pending: new Map() };
+    proc.on("error", () => {
+      for (const resolve of state.pending.values()) resolve({ data: null, port: null });
+      state.pending.clear();
+      if (gSerial.__beefSerialWorker === state) gSerial.__beefSerialWorker = null;
+    });
     proc.stdout.setEncoding("utf-8");
     proc.stdout.on("data", (chunk: string) => {
       state.buf += chunk;

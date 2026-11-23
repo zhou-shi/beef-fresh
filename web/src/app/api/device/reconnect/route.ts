@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
         ? undefined
         : result.availablePorts.length
           ? `ESP32 belum merespons pada port yang terdeteksi (${result.availablePorts.join(", ")}).`
-          : "Tidak ada port USB serial (/dev/ttyUSB* atau /dev/ttyACM*) yang terdeteksi di laptop.",
+          : "Tidak ada port USB serial (COM* di Windows atau /dev/ttyUSB* di Linux) yang terdeteksi di laptop.",
     });
   } catch (e) {
     return Response.json({ ok: false, error: errorMessage(e) }, { status: 500 });

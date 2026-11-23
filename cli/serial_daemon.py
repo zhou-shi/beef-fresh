@@ -9,23 +9,60 @@ import glob
 import json
 import os
 import sys
-import termios
 import time
 
 try:
+    import termios
+except ImportError:
+    termios = None
+
+try:
     import serial
+    from serial.tools import list_ports as pyserial_list_ports
 except Exception:
     serial = None
+    pyserial_list_ports = None
 
 BAUD = int(os.environ.get("SERIAL_BAUD", "115200"))
+IS_WINDOWS = os.name == "nt"
 
 
 def list_ports():
-    ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+    if IS_WINDOWS:
+        if pyserial_list_ports is None:
+            return []
+        raw = list(pyserial_list_ports.comports())
+        # Prioritaskan chip USB-UART umum ESP32 (CP210x, CH340, FTDI, USB Serial)
+        def priority(p):
+            desc = f"{p.description or ''} {p.manufacturer or ''}".lower()
+            if any(k in desc for k in ("cp210", "ch340", "ch910", "ftdi", "silicon labs", "usb", "uart", "serial")):
+                return (0, p.device)
+            return (1, p.device)
+
+        raw.sort(key=priority)
+        return [p.device for p in raw if p.device]
+
+    ports = sorted(
+        set(
+            glob.glob("/dev/ttyUSB*")
+            + glob.glob("/dev/ttyACM*")
+            + glob.glob("/dev/cu.usb*")
+            + glob.glob("/dev/cu.SLAB*")
+            + glob.glob("/dev/cu.wchusb*")
+        )
+    )
+    if not ports and pyserial_list_ports is not None:
+        ports = sorted(
+            p.device
+            for p in pyserial_list_ports.comports()
+            if p.device and ("usb" in p.device.lower() or "acm" in p.device.lower() or "slab" in p.device.lower())
+        )
     return ports
 
 
 def disable_hupcl(fd):
+    if termios is None:
+        return
     try:
         attrs = termios.tcgetattr(fd)
         attrs[2] = attrs[2] & ~termios.HUPCL
@@ -35,7 +72,9 @@ def disable_hupcl(fd):
 
 
 def open_port(port_path):
-    if serial is None or not port_path or not os.path.exists(port_path):
+    if serial is None or not port_path:
+        return None
+    if not IS_WINDOWS and not os.path.exists(port_path):
         return None
     s = serial.Serial()
     s.port = port_path
@@ -44,7 +83,8 @@ def open_port(port_path):
     s.dtr = False
     s.rts = False
     s.open()
-    disable_hupcl(s.fileno())
+    if not IS_WINDOWS:
+        disable_hupcl(s.fileno())
     time.sleep(0.15)
     s.reset_input_buffer()
     return s
