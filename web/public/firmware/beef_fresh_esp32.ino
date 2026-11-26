@@ -34,8 +34,18 @@ bool wbBlackOk = false;
 float wbWhite[3] = {0.0f, 0.0f, 0.0f};
 float wbBlack[3] = {0.0f, 0.0f, 0.0f};
 
-// Dataset Latih yang telah melalui Feature Scaling Min-Max (0-1) di SRAM ESP32
-SampleRGB trainDataScaled[NUM_TRAIN_SAMPLES];
+// Fitur 4D (r = R/sum, g = G/sum, b = B/sum, L = sum/3) di SRAM ESP32
+#ifndef NUM_FEATURES
+#define NUM_FEATURES 4
+#endif
+
+struct SampleFeature {
+  float f[NUM_FEATURES];
+  uint8_t class_id;
+};
+
+SampleFeature trainDataRawFeat[NUM_TRAIN_SAMPLES];
+SampleFeature trainDataScaled[NUM_TRAIN_SAMPLES];
 
 #define MAX_KNN_K 15
 
@@ -62,7 +72,7 @@ String supabaseKey = "YOUR_SUPABASE_ANON_KEY";
 
 // State pengukuran terakhir untuk tampilan OLED
 float lastR = 0, lastG = 0, lastB = 0;
-float lastRNorm = 0, lastGNorm = 0, lastBNorm = 0;
+float lastFeatNorm[NUM_FEATURES] = {0.0f, 0.0f, 0.0f, 0.0f};
 uint8_t lastClass = 0;
 uint32_t lastExecUs = 0;
 bool hasAnalyzed = false;
@@ -85,41 +95,56 @@ const char* classShortLabel(uint8_t cid) {
   }
 }
 
-// Fungsi Normalisasi Min-Max (0 - 1)
+// Fungsi Pembantu & Ekstraksi Fitur (r, g, b, L) + Normalisasi Min-Max
 inline float clamp01(float v) {
   if (v < 0.0f) return 0.0f;
   if (v > 1.0f) return 1.0f;
   return v;
 }
 
-void computeMinMaxBoundsFromTrain() {
-  MINMAX_R_MIN = trainDataRaw[0].r;
-  MINMAX_R_MAX = trainDataRaw[0].r;
-  MINMAX_G_MIN = trainDataRaw[0].g;
-  MINMAX_G_MAX = trainDataRaw[0].g;
-  MINMAX_B_MIN = trainDataRaw[0].b;
-  MINMAX_B_MAX = trainDataRaw[0].b;
+inline void extractFeatures(float r, float g, float b, float out[NUM_FEATURES]) {
+  float sum = r + g + b;
+  if (sum <= 0.0001f) {
+    out[0] = 0.0f;
+    out[1] = 0.0f;
+    out[2] = 0.0f;
+    out[3] = 0.0f;
+    return;
+  }
+  out[0] = r / sum;
+  out[1] = g / sum;
+  out[2] = b / sum;
+  out[3] = sum / 3.0f;
+}
 
-  for (int i = 1; i < NUM_TRAIN_SAMPLES; i++) {
-    if (trainDataRaw[i].r < MINMAX_R_MIN) MINMAX_R_MIN = trainDataRaw[i].r;
-    if (trainDataRaw[i].r > MINMAX_R_MAX) MINMAX_R_MAX = trainDataRaw[i].r;
-    if (trainDataRaw[i].g < MINMAX_G_MIN) MINMAX_G_MIN = trainDataRaw[i].g;
-    if (trainDataRaw[i].g > MINMAX_G_MAX) MINMAX_G_MAX = trainDataRaw[i].g;
-    if (trainDataRaw[i].b < MINMAX_B_MIN) MINMAX_B_MIN = trainDataRaw[i].b;
-    if (trainDataRaw[i].b > MINMAX_B_MAX) MINMAX_B_MAX = trainDataRaw[i].b;
+inline const char* detectSurfaceWarning(float r, float g, float b) {
+  float f[NUM_FEATURES];
+  extractFeatures(r, g, b, f);
+  if (f[3] < 8.0f) return "too_dark";
+  if (f[3] >= 110.0f && f[0] < 0.385f) return "fat_or_membrane";
+  return "ok";
+}
+
+void computeMinMaxBoundsFromTrain() {
+  for (int i = 0; i < NUM_TRAIN_SAMPLES; i++) {
+    extractFeatures(trainDataRaw[i].r, trainDataRaw[i].g, trainDataRaw[i].b, trainDataRawFeat[i].f);
+    trainDataRawFeat[i].class_id = trainDataRaw[i].class_id;
+    for (int j = 0; j < NUM_FEATURES; j++) {
+      float v = trainDataRawFeat[i].f[j];
+      if (i == 0 || v < MINMAX_F_MIN[j]) MINMAX_F_MIN[j] = v;
+      if (i == 0 || v > MINMAX_F_MAX[j]) MINMAX_F_MAX[j] = v;
+    }
   }
 }
 
-uint32_t normalizeSingleSample(float r, float g, float b, float &r_norm, float &g_norm, float &b_norm) {
+uint32_t normalizeSingleSample(float r, float g, float b, float out_norm[NUM_FEATURES]) {
   int64_t t0 = esp_timer_get_time();
-  float r_range = (MINMAX_R_MAX - MINMAX_R_MIN);
-  float g_range = (MINMAX_G_MAX - MINMAX_G_MIN);
-  float b_range = (MINMAX_B_MAX - MINMAX_B_MIN);
-
-  r_norm = (r_range > 0.0001f) ? clamp01((r - MINMAX_R_MIN) / r_range) : 0.0f;
-  g_norm = (g_range > 0.0001f) ? clamp01((g - MINMAX_G_MIN) / g_range) : 0.0f;
-  b_norm = (b_range > 0.0001f) ? clamp01((b - MINMAX_B_MIN) / b_range) : 0.0f;
-
+  float raw_f[NUM_FEATURES];
+  extractFeatures(r, g, b, raw_f);
+  for (int j = 0; j < NUM_FEATURES; j++) {
+    float range = MINMAX_F_MAX[j] - MINMAX_F_MIN[j];
+    out_norm[j] = (range > 1e-6f) ? ((raw_f[j] - MINMAX_F_MIN[j]) / range) : 0.0f;
+  }
   int64_t t1 = esp_timer_get_time();
   uint32_t dt = (uint32_t)(t1 - t0);
   return (dt == 0) ? 2 : dt;
@@ -129,19 +154,18 @@ uint32_t rebuildScaledTrainingSet() {
   int64_t t0 = esp_timer_get_time();
   computeMinMaxBoundsFromTrain();
   for (int i = 0; i < NUM_TRAIN_SAMPLES; i++) {
-    float rn, gn, bn;
-    normalizeSingleSample(trainDataRaw[i].r, trainDataRaw[i].g, trainDataRaw[i].b, rn, gn, bn);
-    trainDataScaled[i].r = rn;
-    trainDataScaled[i].g = gn;
-    trainDataScaled[i].b = bn;
-    trainDataScaled[i].class_id = trainDataRaw[i].class_id;
+    for (int j = 0; j < NUM_FEATURES; j++) {
+      float range = MINMAX_F_MAX[j] - MINMAX_F_MIN[j];
+      trainDataScaled[i].f[j] = (range > 1e-6f) ? ((trainDataRawFeat[i].f[j] - MINMAX_F_MIN[j]) / range) : 0.0f;
+    }
+    trainDataScaled[i].class_id = trainDataRawFeat[i].class_id;
   }
   int64_t t1 = esp_timer_get_time();
   return (uint32_t)(t1 - t0);
 }
 
-// Algoritma KNN dinamis (K = 1..15, default KNN_K=3) di ESP32
-KNNResult runKNN(float r_in, float g_in, float b_in, const SampleRGB* dataset, int n_samples, int kVal = KNN_K) {
+// Algoritma KNN dinamis (K = 1..15, default KNN_K=5) di ESP32 pada ruang fitur 4D (r, g, b, L)
+KNNResult runKNN(const float q[NUM_FEATURES], const SampleFeature* dataset, int n_samples, int kVal = KNN_K) {
   KNNResult res;
   if (kVal < 1) kVal = 1;
   if (kVal > MAX_KNN_K) kVal = MAX_KNN_K;
@@ -155,12 +179,14 @@ KNNResult runKNN(float r_in, float g_in, float b_in, const SampleRGB* dataset, i
     res.top_k[k].distance = 1e9f;
   }
 
-  // Hitung jarak Euclidean ke seluruh data latih & simpan kVal tetangga terdekat
+  // Hitung jarak Euclidean 4D ke seluruh data latih & simpan kVal tetangga terdekat
   for (int i = 0; i < n_samples; i++) {
-    float dr = r_in - dataset[i].r;
-    float dg = g_in - dataset[i].g;
-    float db = b_in - dataset[i].b;
-    float dist = sqrtf(dr * dr + dg * dg + db * db);
+    float sq = 0.0f;
+    for (int j = 0; j < NUM_FEATURES; j++) {
+      float diff = q[j] - dataset[i].f[j];
+      sq += diff * diff;
+    }
+    float dist = sqrtf(sq);
 
     if (dist < res.top_k[kVal - 1].distance) {
       res.top_k[kVal - 1].index = i;
@@ -203,11 +229,11 @@ KNNResult runKNN(float r_in, float g_in, float b_in, const SampleRGB* dataset, i
   res.predicted_class = bestClass;
   res.confidence = (float)votes[bestClass] / (float)kVal;
   res.exec_time_us = (uint32_t)(t1 - t0);
-  res.work_mem_bytes = sizeof(NeighborInfo) * kVal + sizeof(votes) + sizeof(minDistPerClass) + (sizeof(float) * 4);
+  res.work_mem_bytes = sizeof(NeighborInfo) * kVal + sizeof(votes) + sizeof(minDistPerClass) + (sizeof(float) * NUM_FEATURES);
   return res;
 }
 
-void updateOLED(const char* modeTitle, float r, float g, float b, float rn, float gn, float bn, const char* resultText, uint32_t execUs) {
+void updateOLED(const char* modeTitle, float r, float g, float b, const float fn[NUM_FEATURES], const char* resultText, uint32_t execUs, const char* warnText = "ok") {
   if (!oledReady) return;
   display.clearDisplay();
   display.setTextSize(1);
@@ -222,21 +248,27 @@ void updateOLED(const char* modeTitle, float r, float g, float b, float rn, floa
   display.setCursor(0, 13);
   display.printf("RGB : %.0f, %.0f, %.0f", r, g, b);
 
-  // Baris 3: RGB Normalisasi Min-Max (0-1)
+  // Baris 3: Fitur Normalisasi Min-Max (r, g, L)
   display.setCursor(0, 23);
-  display.printf("Norm: %.2f,%.2f,%.2f", rn, gn, bn);
+  display.printf("rgL : %.2f,%.2f,%.2f", fn[0], fn[1], fn[3]);
 
-  // Baris 4-5: Kotak Sorot Hasil Klasifikasi KNN (K=3)
+  // Baris 4-5: Kotak Sorot Hasil Klasifikasi KNN
   display.fillRoundRect(0, 34, 128, 17, 3, SSD1306_WHITE);
   display.setTextColor(SSD1306_BLACK);
   display.setCursor(4, 39);
   display.printf("HASIL: %s", resultText);
 
-  // Baris 6: Performa Eksekusi & Memori ESP32
+  // Baris 6: Peringatan Permukaan atau Performa Eksekusi & Memori ESP32
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 55);
-  uint32_t modelBytes = sizeof(trainDataScaled) + (sizeof(float) * 6);
-  display.printf("KNN:%uus Mem:%.1fKB", execUs, modelBytes / 1024.0f);
+  if (strcmp(warnText, "fat_or_membrane") == 0) {
+    display.print("CEK: LEMAK / SILAU!");
+  } else if (strcmp(warnText, "too_dark") == 0) {
+    display.print("CEK: TERLALU GELAP!");
+  } else {
+    uint32_t modelBytes = sizeof(trainDataScaled) + sizeof(MINMAX_F_MIN) + sizeof(MINMAX_F_MAX);
+    display.printf("KNN:%uus Mem:%.1fKB", execUs, modelBytes / 1024.0f);
+  }
 
   display.display();
 }
@@ -384,17 +416,20 @@ void handleResetCalibration() {
 }
 
 void handleStatus() {
-  float rf, gf, bf, rn, gn, bn;
+  float rf, gf, bf;
+  float f_norm[NUM_FEATURES];
   uint16_t r_u, g_u, b_u, c_u, lux, ct;
   uint32_t sensor_us = 0;
   readSensorRGB(rf, gf, bf, r_u, g_u, b_u, c_u, lux, ct, sensor_us);
-  uint32_t scale_us = normalizeSingleSample(rf, gf, bf, rn, gn, bn);
+  uint32_t scale_us = normalizeSingleSample(rf, gf, bf, f_norm);
+  const char* warn = detectSurfaceWarning(rf, gf, bf);
+  (void)scale_us;
 
   uint32_t totalHeap = ESP.getHeapSize();
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t usedHeap = totalHeap - freeHeap;
-  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + (sizeof(float) * 6);
-  uint32_t datasetRawBytes = sizeof(trainDataRaw);
+  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + sizeof(MINMAX_F_MIN) + sizeof(MINMAX_F_MAX);
+  uint32_t datasetRawBytes = sizeof(trainDataRaw) + sizeof(trainDataRawFeat);
 
   Serial.print("{\"type\":\"status\"");
   Serial.printf(",\"chip_model\":\"%s\",\"chip_rev\":%d,\"cpu_mhz\":%d,\"cores\":%d",
@@ -406,12 +441,12 @@ void handleStatus() {
                 wifiSSID.c_str(),
                 (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString().c_str() : "0.0.0.0",
                 (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0);
-  Serial.printf(",\"sensor\":{\"r_raw\":%.2f,\"g_raw\":%.2f,\"b_raw\":%.2f,\"c_raw\":%u,\"lux\":%u,\"color_temp\":%u,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f}",
-                rf, gf, bf, c_u, lux, ct, rn, gn, bn);
+  Serial.printf(",\"sensor\":{\"r_raw\":%.2f,\"g_raw\":%.2f,\"b_raw\":%.2f,\"c_raw\":%u,\"lux\":%u,\"color_temp\":%u,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f,\"l_norm\":%.4f,\"surface_warning\":\"%s\"}",
+                rf, gf, bf, c_u, lux, ct, f_norm[0], f_norm[1], f_norm[2], f_norm[3], warn);
   Serial.printf(",\"memory\":{\"total_heap_bytes\":%u,\"free_heap_bytes\":%u,\"used_heap_bytes\":%u,\"dataset_scaled_bytes\":%u,\"dataset_raw_bytes\":%u,\"sketch_size_bytes\":%u,\"free_sketch_bytes\":%u}",
                 totalHeap, freeHeap, usedHeap, datasetScaledBytes, datasetRawBytes, ESP.getSketchSize(), ESP.getFreeSketchSpace());
-  Serial.printf(",\"minmax\":{\"r_min\":%.4f,\"r_max\":%.4f,\"g_min\":%.4f,\"g_max\":%.4f,\"b_min\":%.4f,\"b_max\":%.4f}",
-                MINMAX_R_MIN, MINMAX_R_MAX, MINMAX_G_MIN, MINMAX_G_MAX, MINMAX_B_MIN, MINMAX_B_MAX);
+  Serial.printf(",\"minmax\":{\"r_min\":%.6f,\"r_max\":%.6f,\"g_min\":%.6f,\"g_max\":%.6f,\"b_min\":%.6f,\"b_max\":%.6f,\"l_min\":%.4f,\"l_max\":%.4f}",
+                MINMAX_F_MIN[0], MINMAX_F_MAX[0], MINMAX_F_MIN[1], MINMAX_F_MAX[1], MINMAX_F_MIN[2], MINMAX_F_MAX[2], MINMAX_F_MIN[3], MINMAX_F_MAX[3]);
   Serial.printf(",\"calibration\":{\"white_ok\":%s,\"black_ok\":%s,\"white\":[%.2f,%.2f,%.2f],\"black\":[%.2f,%.2f,%.2f]}",
                 wbWhiteOk ? "true" : "false",
                 wbBlackOk ? "true" : "false",
@@ -465,31 +500,34 @@ void runAnalyzePipeline(const String &triggerSource, bool isSim, bool useDummyRg
     sensor_us = sensor_us_total / 3;
   }
 
-  // 1. Tahap Feature Scaling Min-Max (0-1)
-  float r_norm, g_norm, b_norm;
-  uint32_t scaling_us = normalizeSingleSample(r_avg, g_avg, b_avg, r_norm, g_norm, b_norm);
+  // 1. Tahap Ekstraksi Fitur (r, g, b, L) & Feature Scaling Min-Max (0-1)
+  float q_raw[NUM_FEATURES];
+  float q_norm[NUM_FEATURES];
+  extractFeatures(r_avg, g_avg, b_avg, q_raw);
+  uint32_t scaling_us = normalizeSingleSample(r_avg, g_avg, b_avg, q_norm);
+  const char* warn = detectSurfaceWarning(r_avg, g_avg, b_avg);
 
   // 2. Tahap Klasifikasi KNN (K dinamis) DENGAN Feature Scaling Min-Max (0-1)
-  KNNResult knnScaled = runKNN(r_norm, g_norm, b_norm, trainDataScaled, NUM_TRAIN_SAMPLES, kVal);
+  KNNResult knnScaled = runKNN(q_norm, trainDataScaled, NUM_TRAIN_SAMPLES, kVal);
 
-  // 3. Tahap Klasifikasi KNN (K dinamis) TANPA Feature Scaling (Raw RGB) sebagai pembanding
-  KNNResult knnRaw = runKNN(r_avg, g_avg, b_avg, trainDataRaw, NUM_TRAIN_SAMPLES, kVal);
+  // 3. Tahap Klasifikasi KNN (K dinamis) TANPA Feature Scaling (Fitur 4D mentah) sebagai pembanding
+  KNNResult knnRaw = runKNN(q_raw, trainDataRawFeat, NUM_TRAIN_SAMPLES, kVal);
 
   uint32_t total_proc_us = scaling_us + knnScaled.exec_time_us;
   uint32_t totalHeap = ESP.getHeapSize();
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t usedHeap = totalHeap - freeHeap;
-  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + (sizeof(float) * 6);
+  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + sizeof(MINMAX_F_MIN) + sizeof(MINMAX_F_MAX);
 
   lastR = r_avg; lastG = g_avg; lastB = b_avg;
-  lastRNorm = r_norm; lastGNorm = g_norm; lastBNorm = b_norm;
+  for (int j = 0; j < NUM_FEATURES; j++) lastFeatNorm[j] = q_norm[j];
   lastClass = knnScaled.predicted_class;
   lastExecUs = total_proc_us;
   hasAnalyzed = true;
 
   // Tampilkan hasil di layar OLED SSD1306
-  updateOLED(headerBuf, r_avg, g_avg, b_avg, r_norm, g_norm, b_norm,
-             classShortLabel(knnScaled.predicted_class), total_proc_us);
+  updateOLED(headerBuf, r_avg, g_avg, b_avg, q_norm,
+             classShortLabel(knnScaled.predicted_class), total_proc_us, warn);
 
   // Kirim JSON lengkap melalui Serial Bridge
   Serial.print("{\"type\":\"analysis\"");
@@ -497,7 +535,8 @@ void runAnalyzePipeline(const String &triggerSource, bool isSim, bool useDummyRg
                 triggerSource.c_str(), isSim ? "true" : "false", useDummyRgb ? "true" : "false");
   Serial.printf(",\"r_raw\":%.2f,\"g_raw\":%.2f,\"b_raw\":%.2f,\"c_raw\":%u,\"lux\":%u,\"color_temp\":%u",
                 r_avg, g_avg, b_avg, c_avg, lux_avg, ct_avg);
-  Serial.printf(",\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f", r_norm, g_norm, b_norm);
+  Serial.printf(",\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f,\"l_norm\":%.4f,\"surface_warning\":\"%s\"",
+                q_norm[0], q_norm[1], q_norm[2], q_norm[3], warn);
   Serial.printf(",\"predicted_class_id\":%u,\"predicted_label\":\"%s\",\"confidence\":%.4f",
                 knnScaled.predicted_class, classLabel(knnScaled.predicted_class), knnScaled.confidence);
   Serial.printf(",\"predicted_raw_class_id\":%u,\"predicted_raw_label\":\"%s\",\"raw_confidence\":%.4f",
@@ -510,12 +549,13 @@ void runAnalyzePipeline(const String &triggerSource, bool isSim, bool useDummyRg
   Serial.print(",\"nearest_neighbors\":[");
   for (int k = 0; k < knnScaled.k_used; k++) {
     int idx = knnScaled.top_k[k].index;
-    Serial.printf("{\"rank\":%d,\"train_index\":%d,\"class_id\":%u,\"label\":\"%s\",\"distance\":%.4f,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f}%s",
+    Serial.printf("{\"rank\":%d,\"train_index\":%d,\"class_id\":%u,\"label\":\"%s\",\"distance\":%.4f,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f,\"l_norm\":%.4f}%s",
                   k + 1, idx, knnScaled.top_k[k].class_id, classLabel(knnScaled.top_k[k].class_id),
                   knnScaled.top_k[k].distance,
-                  (idx >= 0) ? trainDataScaled[idx].r : 0.0f,
-                  (idx >= 0) ? trainDataScaled[idx].g : 0.0f,
-                  (idx >= 0) ? trainDataScaled[idx].b : 0.0f,
+                  (idx >= 0) ? trainDataScaled[idx].f[0] : 0.0f,
+                  (idx >= 0) ? trainDataScaled[idx].f[1] : 0.0f,
+                  (idx >= 0) ? trainDataScaled[idx].f[2] : 0.0f,
+                  (idx >= 0) ? trainDataScaled[idx].f[3] : 0.0f,
                   (k < knnScaled.k_used - 1) ? "," : "");
   }
   Serial.println("]}");
@@ -579,17 +619,19 @@ void handleBenchmark() {
   for (int i = 0; i < NUM_TEST_SAMPLES; i++) {
     uint8_t actual = testDataRaw[i].class_id;
 
-    // 1. Evaluasi Tanpa Feature Scaling (Raw RGB)
-    KNNResult resRaw = runKNN(testDataRaw[i].r, testDataRaw[i].g, testDataRaw[i].b, trainDataRaw, NUM_TRAIN_SAMPLES);
+    // 1. Evaluasi Tanpa Feature Scaling (Fitur 4D mentah)
+    float q_raw[NUM_FEATURES];
+    extractFeatures(testDataRaw[i].r, testDataRaw[i].g, testDataRaw[i].b, q_raw);
+    KNNResult resRaw = runKNN(q_raw, trainDataRawFeat, NUM_TRAIN_SAMPLES);
     totalKnnRawUs += resRaw.exec_time_us;
     if (resRaw.predicted_class == actual) correctRaw++;
     if (actual < 3 && resRaw.predicted_class < 3) cmRaw[actual][resRaw.predicted_class]++;
 
     // 2. Evaluasi Dengan Feature Scaling Min-Max (0-1)
-    float rn, gn, bn;
-    uint32_t scUs = normalizeSingleSample(testDataRaw[i].r, testDataRaw[i].g, testDataRaw[i].b, rn, gn, bn);
+    float q_norm[NUM_FEATURES];
+    uint32_t scUs = normalizeSingleSample(testDataRaw[i].r, testDataRaw[i].g, testDataRaw[i].b, q_norm);
     totalScalingUs += scUs;
-    KNNResult resScaled = runKNN(rn, gn, bn, trainDataScaled, NUM_TRAIN_SAMPLES);
+    KNNResult resScaled = runKNN(q_norm, trainDataScaled, NUM_TRAIN_SAMPLES);
     totalKnnScaledUs += resScaled.exec_time_us;
     if (resScaled.predicted_class == actual) correctScaled++;
     if (actual < 3 && resScaled.predicted_class < 3) cmScaled[actual][resScaled.predicted_class]++;
@@ -601,8 +643,8 @@ void handleBenchmark() {
   float avgKnnScaledUs = (float)totalKnnScaledUs / (float)NUM_TEST_SAMPLES;
   float avgKnnRawUs = (float)totalKnnRawUs / (float)NUM_TEST_SAMPLES;
 
-  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + (sizeof(float) * 6);
-  uint32_t datasetRawBytes = sizeof(trainDataRaw);
+  uint32_t datasetScaledBytes = sizeof(trainDataScaled) + sizeof(MINMAX_F_MIN) + sizeof(MINMAX_F_MAX);
+  uint32_t datasetRawBytes = sizeof(trainDataRaw) + sizeof(trainDataRawFeat);
   uint32_t knnWorkBytes = sizeof(KNNResult) + 32;
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t totalHeap = ESP.getHeapSize();
@@ -612,12 +654,12 @@ void handleBenchmark() {
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println("BENCHMARK KNN (K=3)");
+    display.printf("BENCHMARK KNN (K=%d)", KNN_K);
     display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
     display.setCursor(0, 13);
-    display.printf("Raw RGB : %.2f%%(%u/36)", accRaw, correctRaw);
+    display.printf("Tanpa   : %.2f%%(%u/%d)", accRaw, correctRaw, NUM_TEST_SAMPLES);
     display.setCursor(0, 24);
-    display.printf("Min-Max : %.2f%%(%u/36)", accScaled, correctScaled);
+    display.printf("Min-Max : %.2f%%(%u/%d)", accScaled, correctScaled, NUM_TEST_SAMPLES);
     display.setCursor(0, 36);
     display.printf("Time/Smp: %.1f us", avgScalingUs + avgKnnScaledUs);
     display.setCursor(0, 47);
@@ -701,13 +743,14 @@ void setup() {
   }
 
   // Ambil 1 pembacaan awal untuk tampilan standby OLED
-  float rf, gf, bf, rn, gn, bn;
+  float rf, gf, bf;
+  float f_norm[NUM_FEATURES];
   uint16_t r_u, g_u, b_u, c_u, lux, ct;
   uint32_t s_us = 0;
   readSensorRGB(rf, gf, bf, r_u, g_u, b_u, c_u, lux, ct, s_us);
-  normalizeSingleSample(rf, gf, bf, rn, gn, bn);
-  KNNResult initKnn = runKNN(rn, gn, bn, trainDataScaled, NUM_TRAIN_SAMPLES);
-  updateOLED("BEEF FRESH | SIAP", rf, gf, bf, rn, gn, bn, classShortLabel(initKnn.predicted_class), initKnn.exec_time_us);
+  normalizeSingleSample(rf, gf, bf, f_norm);
+  KNNResult initKnn = runKNN(f_norm, trainDataScaled, NUM_TRAIN_SAMPLES);
+  updateOLED("BEEF FRESH | SIAP", rf, gf, bf, f_norm, classShortLabel(initKnn.predicted_class), initKnn.exec_time_us, detectSurfaceWarning(rf, gf, bf));
 }
 
 void loop() {
@@ -719,14 +762,16 @@ void loop() {
     if (line == "STATUS" || line == "PING") {
       handleStatus();
     } else if (line == "READ_SENSOR") {
-      float rf, gf, bf, rn, gn, bn;
+      float rf, gf, bf;
+      float f_norm[NUM_FEATURES];
       uint16_t r_u, g_u, b_u, c_u, lux, ct;
       uint32_t s_us = 0;
       readSensorRGB(rf, gf, bf, r_u, g_u, b_u, c_u, lux, ct, s_us);
-      uint32_t sc_us = normalizeSingleSample(rf, gf, bf, rn, gn, bn);
-      KNNResult kRes = runKNN(rn, gn, bn, trainDataScaled, NUM_TRAIN_SAMPLES);
-      Serial.printf("{\"type\":\"sensor\",\"r_raw\":%.2f,\"g_raw\":%.2f,\"b_raw\":%.2f,\"c_raw\":%u,\"lux\":%u,\"color_temp\":%u,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f,\"predicted_label\":\"%s\",\"exec_us\":%u}\n",
-                    rf, gf, bf, c_u, lux, ct, rn, gn, bn, classLabel(kRes.predicted_class), sc_us + kRes.exec_time_us);
+      uint32_t sc_us = normalizeSingleSample(rf, gf, bf, f_norm);
+      const char* warn = detectSurfaceWarning(rf, gf, bf);
+      KNNResult kRes = runKNN(f_norm, trainDataScaled, NUM_TRAIN_SAMPLES);
+      Serial.printf("{\"type\":\"sensor\",\"r_raw\":%.2f,\"g_raw\":%.2f,\"b_raw\":%.2f,\"c_raw\":%u,\"lux\":%u,\"color_temp\":%u,\"r_norm\":%.4f,\"g_norm\":%.4f,\"b_norm\":%.4f,\"l_norm\":%.4f,\"surface_warning\":\"%s\",\"predicted_label\":\"%s\",\"exec_us\":%u}\n",
+                    rf, gf, bf, c_u, lux, ct, f_norm[0], f_norm[1], f_norm[2], f_norm[3], warn, classLabel(kRes.predicted_class), sc_us + kRes.exec_time_us);
     } else if (line.startsWith("ANALYZE")) {
       String src = "website";
       int kVal = KNN_K;

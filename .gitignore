@@ -20,6 +20,9 @@ venv/
 references/
 data/*.json
 
+# Local auto-provisioned CLI / Python venv tools
+.tools/
+
 # OS & logs
 .DS_Store
 Thumbs.db

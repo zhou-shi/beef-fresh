@@ -12,11 +12,35 @@ const ROOT_DIR = path.resolve(process.cwd(), "..");
 const DAEMON_SCRIPT = path.join(ROOT_DIR, "cli", "serial_daemon.py");
 const SERIAL_PORT = process.env.SERIAL_PORT || (IS_WIN ? "COM3" : "/dev/ttyUSB0");
 
+export function getProjectVenvPythonPath(): string {
+  return IS_WIN
+    ? path.join(ROOT_DIR, ".tools", "pyvenv", "Scripts", "python.exe")
+    : path.join(ROOT_DIR, ".tools", "pyvenv", "bin", "python");
+}
+
 let cachedPythonCmd: { cmd: string; prefixArgs: string[] } | null = null;
 
-function findPythonCommand(): { cmd: string; prefixArgs: string[] } {
+export function resetPythonCache() {
+  cachedPythonCmd = null;
+  const w = gSerial.__beefSerialWorker;
+  if (w) {
+    gSerial.__beefSerialWorker = null;
+    try {
+      w.proc.stdin.end();
+      w.proc.kill("SIGTERM");
+    } catch {
+      // abaikan
+    }
+  }
+}
+
+export function findPythonCommand(): { cmd: string; prefixArgs: string[] } | null {
   if (cachedPythonCmd) return cachedPythonCmd;
   const candidates: Array<{ cmd: string; prefixArgs: string[] }> = [];
+  const venvPy = getProjectVenvPythonPath();
+  if (fs.existsSync(/*turbopackIgnore: true*/ venvPy)) {
+    candidates.push({ cmd: venvPy, prefixArgs: [] });
+  }
   if (process.env.PYTHON_BIN) candidates.push({ cmd: process.env.PYTHON_BIN, prefixArgs: [] });
   if (IS_WIN) {
     candidates.push(
@@ -30,10 +54,22 @@ function findPythonCommand(): { cmd: string; prefixArgs: string[] } {
       { cmd: "python", prefixArgs: [] },
     );
   }
+  let firstWorking: { cmd: string; prefixArgs: string[] } | null = null;
   for (const c of candidates) {
     try {
-      const res = spawnSync(c.cmd, [...c.prefixArgs, "--version"], { stdio: "ignore", timeout: 2500 });
-      if (res.status === 0) {
+      const ver = spawnSync(/*turbopackIgnore: true*/ c.cmd, [...c.prefixArgs, "--version"], {
+        stdio: "ignore",
+        timeout: 2500,
+        windowsHide: true,
+      });
+      if (ver.status !== 0) continue;
+      if (!firstWorking) firstWorking = c;
+      const hasSerial = spawnSync(/*turbopackIgnore: true*/ c.cmd, [...c.prefixArgs, "-c", "import serial"], {
+        stdio: "ignore",
+        timeout: 2500,
+        windowsHide: true,
+      });
+      if (hasSerial.status === 0) {
         cachedPythonCmd = c;
         return c;
       }
@@ -41,8 +77,11 @@ function findPythonCommand(): { cmd: string; prefixArgs: string[] } {
       // coba kandidat berikutnya
     }
   }
-  cachedPythonCmd = IS_WIN ? { cmd: "python", prefixArgs: [] } : { cmd: "python3", prefixArgs: [] };
-  return cachedPythonCmd;
+  if (firstWorking) {
+    cachedPythonCmd = firstWorking;
+    return firstWorking;
+  }
+  return null;
 }
 
 const CLASS_ID: Record<Label, number> = {
@@ -134,6 +173,54 @@ export function setFlashingState(flashing: boolean) {
   }
 }
 
+export async function releaseSerialPortForFlashing(): Promise<void> {
+  gSerial.__beefFlashing = true;
+  const w = gSerial.__beefSerialWorker;
+  if (w) {
+    gSerial.__beefSerialWorker = null;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        try {
+          w.proc.kill("SIGTERM");
+        } catch {
+          // abaikan
+        }
+        finish();
+      }, 1400);
+      w.proc.once("exit", () => {
+        clearTimeout(timer);
+        finish();
+      });
+      try {
+        w.proc.stdin.write(JSON.stringify({ id: ++w.seq, cmd: "__CLOSE__", timeout: 1.0 }) + "\n");
+        setTimeout(() => {
+          try {
+            w.proc.stdin.end();
+            w.proc.kill("SIGTERM");
+          } catch {
+            // abaikan
+          }
+        }, 250);
+      } catch {
+        clearTimeout(timer);
+        try {
+          w.proc.kill("SIGTERM");
+        } catch {
+          // abaikan
+        }
+        finish();
+      }
+    });
+  }
+  await new Promise((r) => setTimeout(r, IS_WIN ? 700 : 350));
+}
+
 export function isFlashingInProgress(): boolean {
   return Boolean(gSerial.__beefFlashing);
 }
@@ -198,7 +285,8 @@ function getWorker(): WorkerState | null {
   }
   try {
     const py = findPythonCommand();
-    const proc = spawn(py.cmd, [...py.prefixArgs, "-u", DAEMON_SCRIPT], {
+    if (!py) return null;
+    const proc = spawn(/*turbopackIgnore: true*/ py.cmd, [...py.prefixArgs, "-u", DAEMON_SCRIPT], {
       env: { ...process.env, SERIAL_PORT },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -357,7 +445,8 @@ export async function getCachedSerialStatus(force = false): Promise<SerialStatus
 export async function executeSerialCommand(cmd: DeviceCommand, isSim: boolean): Promise<boolean> {
   if (!isSerialPortPresent()) return false;
   const source: "device" | "simulasi" = isSim ? "simulasi" : "device";
-  const deviceId = isSim ? `ESP32 Simulasi (${SERIAL_PORT})` : `ESP32 (${SERIAL_PORT})`;
+  const activePort = getActiveSerialPort() ?? SERIAL_PORT;
+  const deviceId = isSim ? `ESP32 Simulasi (${activePort})` : `ESP32 (${activePort})`;
 
   if (cmd.type === "ping" || cmd.type === "sync") {
     const st = await getCachedSerialStatus(true);
@@ -522,9 +611,10 @@ export async function executeSerialCommand(cmd: DeviceCommand, isSim: boolean): 
     const accRaw = Number(res.acc_without_scaling ?? 0);
     const accScaled = Number(res.acc_with_minmax ?? 0);
 
+    const kVal = Number(res.k_value ?? 5);
     setLastOledLines([
-      "BENCHMARK KNN (K=3)",
-      `Raw RGB : ${accRaw.toFixed(1)}% (${res.correct_without_scaling ?? 0}/${testCount})`,
+      `BENCHMARK KNN (K=${kVal})`,
+      `Tanpa   : ${accRaw.toFixed(1)}% (${res.correct_without_scaling ?? 0}/${testCount})`,
       `Min-Max : ${accScaled.toFixed(1)}% (${res.correct_with_minmax ?? 0}/${testCount})`,
       `=TIME: ${(scaleUs + knnScaledUs).toFixed(1)} us`,
       `RAM Model: ${dsScaled} B`,

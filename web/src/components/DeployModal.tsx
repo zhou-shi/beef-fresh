@@ -5,16 +5,18 @@ import { CheckCircle2, Cpu, LoaderCircle, ShieldAlert, XCircle } from "lucide-re
 import { Button, ProgressBar, cn } from "./ui";
 
 const STEPS = [
-  { id: 1, label: "Menyiapkan file dataset_model.h" },
-  { id: 2, label: "Melepas sementara port serial USB" },
-  { id: 3, label: "Mengompilasi firmware ESP32" },
-  { id: 4, label: "Mengunggah model ke memori flash ESP32" },
-  { id: 5, label: "Menyambungkan ulang dan sinkronisasi OLED" },
+  { id: 1, label: "Memeriksa & menyiapkan Arduino CLI, Core ESP32 & Library" },
+  { id: 2, label: "Menyiapkan file dataset_model.h & deteksi port ESP32" },
+  { id: 3, label: "Melepas sementara port serial USB" },
+  { id: 4, label: "Mengompilasi firmware ESP32" },
+  { id: 5, label: "Mengunggah model ke memori flash ESP32" },
+  { id: 6, label: "Menyambungkan ulang dan sinkronisasi OLED" },
 ];
 
 export interface DeployModalProps {
   open: boolean;
   datasetLabel?: string;
+  port?: string;
   onClose: (succeeded: boolean) => void;
 }
 
@@ -22,12 +24,13 @@ export interface DeployModalProps {
  * Modal progres penuh yang mengunci seluruh interaksi website selama proses
  * kompilasi & upload model fix ke ESP32 agar tidak terganggu.
  */
-export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
+export function DeployModal({ open, datasetLabel, port, onClose }: DeployModalProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const startedRef = useRef(false);
   const [step, setStep] = useState(0);
   const [percent, setPercent] = useState(0);
   const [message, setMessage] = useState("Memulai proses tanam model ke ESP32");
+  const [detail, setDetail] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [ok, setOk] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,13 +53,19 @@ export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
     setStep(1);
     setPercent(5);
     setMessage("Menghubungi server untuk menanam dataset aktif ke ESP32");
+    setDetail(null);
     setDone(false);
     setOk(false);
     setError(null);
 
     const run = async () => {
       try {
-        const res = await fetch("/api/device/deploy-model", { method: "POST", cache: "no-store" });
+        const res = await fetch("/api/device/deploy-model", {
+          method: "POST",
+          cache: "no-store",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(port ? { port } : {}),
+        });
         if (!res.ok || !res.body) {
           const j = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(j.error ?? `HTTP ${res.status}`);
@@ -77,6 +86,7 @@ export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
                   step?: number;
                   percent?: number;
                   message?: string;
+                  detail?: string;
                   done?: boolean;
                   ok?: boolean;
                   error?: string;
@@ -84,6 +94,7 @@ export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
                 if (typeof ev.step === "number" && ev.step > 0) setStep(ev.step);
                 if (typeof ev.percent === "number") setPercent(ev.percent);
                 if (ev.message) setMessage(ev.message);
+                if (ev.detail !== undefined) setDetail(ev.detail || null);
                 if (ev.done) {
                   setDone(true);
                   setOk(Boolean(ev.ok));
@@ -105,7 +116,7 @@ export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
     };
 
     void run();
-  }, [open]);
+  }, [open, port]);
 
   if (!open) return null;
 
@@ -160,6 +171,11 @@ export function DeployModal({ open, datasetLabel, onClose }: DeployModalProps) {
             className="h-2.5"
           />
           <div className="mt-2 text-xs font-medium text-fat-100">{message}</div>
+          {detail && !done && (
+            <div className="mt-1.5 truncate rounded-lg bg-black/25 px-2.5 py-1 font-mono text-[10.5px] text-fat-300/75" title={detail}>
+              {detail}
+            </div>
+          )}
         </div>
 
         <ol className="mt-4 space-y-2 rounded-xl border border-line bg-black/30 p-3.5 text-xs">

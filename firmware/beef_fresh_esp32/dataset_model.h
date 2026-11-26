@@ -7,7 +7,8 @@
 // Dataset latih: 144 sampel, Dataset uji: 36 sampel
 #define NUM_TRAIN_SAMPLES 144
 #define NUM_TEST_SAMPLES 36
-#define KNN_K 3
+#define NUM_FEATURES 4
+#define KNN_K 5
 
 struct SampleRGB {
   float r;
@@ -16,12 +17,8 @@ struct SampleRGB {
   uint8_t class_id;
 };
 
-float MINMAX_R_MIN = 12.26f;
-float MINMAX_R_MAX = 204.06f;
-float MINMAX_G_MIN = 10.07f;
-float MINMAX_G_MAX = 103.64f;
-float MINMAX_B_MIN = 10.32f;
-float MINMAX_B_MAX = 132.89f;
+float MINMAX_F_MIN[NUM_FEATURES] = { 0.347948f, 0.199016f, 0.282388f, 10.883333f };
+float MINMAX_F_MAX[NUM_FEATURES] = { 0.518596f, 0.326860f, 0.329530f, 146.863333f };
 
 SampleRGB trainDataRaw[NUM_TRAIN_SAMPLES] = {
   {91.94f, 40.92f, 55.50f, 0}, // TRN-SGR-001

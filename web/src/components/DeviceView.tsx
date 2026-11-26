@@ -2,12 +2,12 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
-import { Cable, Check, Copy, Cpu, DoorOpen, Download, Eye, FileCode, Lightbulb, Microchip, Monitor, RefreshCw, Rotate3d, ScanEye, ScanLine, Server, Usb } from "lucide-react";
+import { Cable, Check, CheckCircle2, Copy, Cpu, DoorOpen, Download, Eye, FileCode, Lightbulb, Microchip, Monitor, RefreshCw, Rotate3d, ScanEye, ScanLine, Server, Usb, Wrench, XCircle } from "lucide-react";
 import { api, usePoll } from "@/lib/client";
 import { PIN_MAP, fmtBytes, timeAgo } from "@/lib/constants";
 import { DEFAULT_VISUAL, OLED, type DeviceVisual } from "@/lib/device-visual";
 import type { LiteOverview } from "@/lib/types";
-import { Badge, Button, Card, StatusDot, cn } from "@/components/ui";
+import { Badge, Button, Card, ProgressBar, StatusDot, cn } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DeployModal } from "@/components/DeployModal";
 
@@ -17,6 +17,18 @@ const DeviceScene = dynamic(() => import("@/components/three/DeviceScene"), {
 });
 
 const PLACEHOLDER_URL = "https://your-app.example.com";
+
+interface ToolchainStatusDTO {
+  platform: string;
+  arch: string;
+  osLabel: string;
+  ready: boolean;
+  busy: boolean;
+  arduinoCli: { ok: boolean; path: string | null; version: string | null };
+  esp32Core: { ok: boolean; version: string | null };
+  libraries: Array<{ name: string; ok: boolean; version: string | null }>;
+  python: { ok: boolean; command: string | null; pyserialOk: boolean; pyserialVersion: string | null };
+}
 
 function WiringDiagram() {
   const esp = [
@@ -106,6 +118,88 @@ export default function DeviceView() {
   const [reconMsg, setReconMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [confirmDeploy, setConfirmDeploy] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
+  const [tcStatus, setTcStatus] = useState<ToolchainStatusDTO | null>(null);
+  const [tcLoading, setTcLoading] = useState(false);
+  const [tcInstallBusy, setTcInstallBusy] = useState(false);
+  const [tcPercent, setTcPercent] = useState(0);
+  const [tcMsg, setTcMsg] = useState<string | null>(null);
+  const [tcDetail, setTcDetail] = useState<string | null>(null);
+  const [tcErr, setTcErr] = useState<string | null>(null);
+  const [kBusy, setKBusy] = useState(false);
+
+  async function refreshToolchain() {
+    setTcLoading(true);
+    try {
+      const res = await api<{ ok: boolean; status?: ToolchainStatusDTO }>("/api/device/toolchain");
+      if (res.status) setTcStatus(res.status);
+    } catch {
+      // abaikan
+    } finally {
+      setTcLoading(false);
+    }
+  }
+
+  async function installToolchain() {
+    setTcInstallBusy(true);
+    setTcPercent(4);
+    setTcMsg("Menyiapkan komponen yang diperlukan...");
+    setTcDetail(null);
+    setTcErr(null);
+    try {
+      const res = await fetch("/api/device/toolchain", { method: "POST", cache: "no-store" });
+      if (!res.ok || !res.body) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error ?? `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done: streamDone } = await reader.read();
+        if (value) {
+          buf += decoder.decode(value, { stream: true });
+          let nl = buf.indexOf("\n");
+          while (nl >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (line) {
+              const ev = JSON.parse(line) as {
+                percent?: number;
+                message?: string;
+                detail?: string;
+                done?: boolean;
+                ok?: boolean;
+                error?: string;
+                status?: ToolchainStatusDTO;
+              };
+              if (typeof ev.percent === "number") setTcPercent(ev.percent);
+              if (ev.message) setTcMsg(ev.message);
+              if (ev.detail !== undefined) setTcDetail(ev.detail || null);
+              if (ev.status) setTcStatus(ev.status);
+              if (ev.done && !ev.ok && ev.error) setTcErr(ev.error);
+            }
+            nl = buf.indexOf("\n");
+          }
+        }
+        if (streamDone) break;
+      }
+      await refreshToolchain();
+    } catch (e) {
+      setTcErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTcInstallBusy(false);
+    }
+  }
+
+  async function setOptimalK5() {
+    setKBusy(true);
+    try {
+      await api("/api/settings", { method: "PUT", json: { defaultK: 5 } });
+      await refresh();
+    } finally {
+      setKBusy(false);
+    }
+  }
 
   async function reconnectUsb() {
     setReconBusy(true);
@@ -169,6 +263,7 @@ export default function DeviceView() {
       .then((r) => r.text())
       .then(setCode)
       .catch(() => setCode("// Gagal memuat firmware"));
+    void refreshToolchain();
   }, []);
 
   const finalCode = useMemo(() => (origin ? code.replace(PLACEHOLDER_URL, origin) : code), [code, origin]);
@@ -270,6 +365,92 @@ export default function DeviceView() {
               <span>Belum ada port USB serial yang terdeteksi. Colokkan kabel USB ESP32 lalu klik Scan.</span>
             )}
           </div>
+        </div>
+      </Card>
+
+      <Card
+        title="Kesiapan Toolchain ESP32 (Windows 11 & Ubuntu)"
+        subtitle="Arduino CLI, Core esp32:esp32, 4 Library Adafruit, dan Python PySerial diperiksa otomatis dan dapat diunduh langsung jika belum tersedia"
+        icon={<Wrench className="h-4 w-4" />}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            {tcStatus?.osLabel && <Badge tone="info">{tcStatus.osLabel}</Badge>}
+            <Badge tone={tcStatus?.ready ? "ok" : "warn"}>
+              <StatusDot tone={tcStatus?.ready ? "ok" : "warn"} />
+              {tcStatus ? (tcStatus.ready ? "Siap Tanam" : "Perlu Disiapkan") : "Memeriksa..."}
+            </Badge>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="flex items-center justify-between rounded-xl border border-line bg-black/20 px-3 py-2 text-xs">
+              <div>
+                <div className="font-semibold text-fat-50">Arduino CLI</div>
+                <div className="text-[11px] text-fat-300/65">{tcStatus?.arduinoCli.version ? `v${tcStatus.arduinoCli.version}` : "Belum terpasang"}</div>
+              </div>
+              {tcStatus?.arduinoCli.ok ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <XCircle className="h-4 w-4 text-amber-400" />}
+            </div>
+            <div className="flex items-center justify-between rounded-xl border border-line bg-black/20 px-3 py-2 text-xs">
+              <div>
+                <div className="font-semibold text-fat-50">Core ESP32</div>
+                <div className="text-[11px] text-fat-300/65">{tcStatus?.esp32Core.version ? `esp32 v${tcStatus.esp32Core.version}` : "Belum terpasang"}</div>
+              </div>
+              {tcStatus?.esp32Core.ok ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <XCircle className="h-4 w-4 text-amber-400" />}
+            </div>
+            <div className="flex items-center justify-between rounded-xl border border-line bg-black/20 px-3 py-2 text-xs">
+              <div>
+                <div className="font-semibold text-fat-50">Library Adafruit (4)</div>
+                <div className="text-[11px] text-fat-300/65">
+                  {tcStatus ? `${tcStatus.libraries.filter((l) => l.ok).length}/${tcStatus.libraries.length} terpasang` : "Memeriksa..."}
+                </div>
+              </div>
+              {tcStatus?.libraries.every((l) => l.ok) ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <XCircle className="h-4 w-4 text-amber-400" />}
+            </div>
+            <div className="flex items-center justify-between rounded-xl border border-line bg-black/20 px-3 py-2 text-xs">
+              <div>
+                <div className="font-semibold text-fat-50">Python & PySerial</div>
+                <div className="text-[11px] text-fat-300/65">
+                  {tcStatus?.python.pyserialOk
+                    ? `pyserial ${tcStatus.python.pyserialVersion ?? "ok"}`
+                    : tcStatus?.python.ok
+                      ? "PySerial belum ada"
+                      : "Python 3 belum ada"}
+                </div>
+              </div>
+              {tcStatus?.python.pyserialOk ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <XCircle className="h-4 w-4 text-amber-400" />}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="primary" icon={<Download className="h-3.5 w-3.5" />} loading={tcInstallBusy} onClick={() => void installToolchain()}>
+                Siapkan / Unduh Otomatis
+              </Button>
+              <Button size="sm" variant="outline" icon={<RefreshCw className={cn("h-3.5 w-3.5", tcLoading && "animate-spin")} />} loading={tcLoading} onClick={() => void refreshToolchain()}>
+                Cek Ulang
+              </Button>
+              {ov?.settings && ov.settings.defaultK !== 5 && (
+                <Button size="sm" variant="soft" loading={kBusy} onClick={() => void setOptimalK5()}>
+                  Set Default K = 5 (Optimal 100%)
+                </Button>
+              )}
+            </div>
+            {ov?.settings && (
+              <div className="text-xs text-fat-300/70">
+                Model aktif: <b className="font-mono text-fat-100">K = {ov.settings.defaultK}</b> ({ov.settings.defaultScaling})
+              </div>
+            )}
+          </div>
+
+          {(tcInstallBusy || tcMsg || tcErr) && (
+            <div className="rounded-xl border border-line bg-black/25 p-3 text-xs">
+              {tcInstallBusy && <ProgressBar value={tcPercent} max={100} color="#e5383b" className="mb-2 h-2" />}
+              {tcMsg && <div className="font-medium text-fat-100">{tcMsg}</div>}
+              {tcDetail && <div className="mt-1 truncate font-mono text-[11px] text-fat-300/70">{tcDetail}</div>}
+              {tcErr && <div className="mt-1.5 font-mono text-[11px] text-red-300 break-words">{tcErr}</div>}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -537,7 +718,7 @@ export default function DeviceView() {
       <ConfirmDialog
         open={confirmDeploy}
         title="Tanam Model ke ESP32 Sekarang?"
-        description={`Dataset "${ov?.activeDataset?.name ?? "Aktif"}" (${ov?.counts.train.total ?? 0} data latih, ${ov?.counts.test.total ?? 0} data uji) akan ditulis ke dataset_model.h lalu dikompilasi dan diunggah ke ESP32. Selama proses (~20 detik), seluruh website dikunci sementara.`}
+        description={`Dataset "${ov?.activeDataset?.name ?? "Aktif"}" (${ov?.counts.train.total ?? 0} data latih, ${ov?.counts.test.total ?? 0} data uji, K=${ov?.settings.defaultK ?? 5}) akan ditulis ke dataset_model.h lalu dikompilasi dan diunggah ke ESP32. Jika Arduino CLI, Core ESP32, atau library belum ada di laptop ini, sistem akan mengunduhnya otomatis terlebih dahulu.`}
         confirmLabel="Mulai Tanam ke ESP32"
         tone="beef"
         onConfirm={() => {
@@ -549,9 +730,13 @@ export default function DeviceView() {
       <DeployModal
         open={deployOpen}
         datasetLabel={ov?.activeDataset?.name}
+        port={selectedPort || ov?.device.usbPort || undefined}
         onClose={(succeeded) => {
           setDeployOpen(false);
-          if (succeeded) void refresh();
+          if (succeeded) {
+            void refresh();
+            void refreshToolchain();
+          }
         }}
       />
     </div>

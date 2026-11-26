@@ -32,10 +32,12 @@ def list_ports():
         if pyserial_list_ports is None:
             return []
         raw = list(pyserial_list_ports.comports())
-        # Prioritaskan chip USB-UART umum ESP32 (CP210x, CH340, FTDI, USB Serial)
+        # Prioritaskan chip USB-UART umum ESP32 (CP210x, CH340, FTDI, USB Serial) dan turunkan Bluetooth virtual
         def priority(p):
-            desc = f"{p.description or ''} {p.manufacturer or ''}".lower()
-            if any(k in desc for k in ("cp210", "ch340", "ch910", "ftdi", "silicon labs", "usb", "uart", "serial")):
+            desc = f"{p.description or ''} {p.manufacturer or ''} {p.hwid or ''}".lower()
+            if "bluetooth" in desc or "bthenum" in desc:
+                return (2, p.device)
+            if any(k in desc for k in ("cp210", "ch340", "ch910", "ftdi", "silicon labs", "espressif", "usb-serial", "usb", "uart", "serial")):
                 return (0, p.device)
             return (1, p.device)
 
@@ -148,81 +150,94 @@ def main():
 
         return None, None, ports
 
-    for raw_line in sys.stdin:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        req_id = None
-        try:
-            req = json.loads(raw_line)
-            req_id = req.get("id")
-            cmd = str(req.get("cmd", "")).strip()
-            timeout = float(req.get("timeout", 4.0))
-            preferred_port = req.get("port")
+    try:
+        for raw_line in sys.stdin:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            req_id = None
+            try:
+                req = json.loads(raw_line)
+                req_id = req.get("id")
+                cmd = str(req.get("cmd", "")).strip()
+                timeout = float(req.get("timeout", 4.0))
+                preferred_port = req.get("port")
 
-            if cmd == "__LIST_PORTS__":
-                ports = list_ports()
-                if active_port not in ports:
+                if cmd == "__CLOSE__":
                     close_quietly(ser)
                     ser = None
                     active_port = None
-                sys.stdout.write(json.dumps({"id": req_id, "data": {"ports": ports, "activePort": active_port}, "port": active_port}) + "\n")
-                sys.stdout.flush()
-                continue
+                    sys.stdout.write(json.dumps({"id": req_id, "data": {"closed": True}, "port": None}) + "\n")
+                    sys.stdout.flush()
+                    continue
 
-            if cmd == "__RECONNECT__":
+                if cmd == "__LIST_PORTS__":
+                    ports = list_ports()
+                    if active_port not in ports:
+                        close_quietly(ser)
+                        ser = None
+                        active_port = None
+                    sys.stdout.write(json.dumps({"id": req_id, "data": {"ports": ports, "activePort": active_port}, "port": active_port}) + "\n")
+                    sys.stdout.flush()
+                    continue
+
+                if cmd == "__RECONNECT__":
+                    close_quietly(ser)
+                    ser = None
+                    active_port = None
+                    ports = list_ports()
+                    candidates = ([preferred_port] if preferred_port in ports else []) + [p for p in ports if p != preferred_port]
+                    found_data = None
+                    for cand in candidates:
+                        try:
+                            s = open_port(cand)
+                            if s is None:
+                                continue
+                            res = query_on_port(s, "STATUS", 2.5)
+                            if res is not None:
+                                ser = s
+                                active_port = cand
+                                found_data = res
+                                break
+                            close_quietly(s)
+                        except Exception:
+                            pass
+                    sys.stdout.write(
+                        json.dumps({"id": req_id, "data": found_data, "port": active_port, "ports": ports}) + "\n"
+                    )
+                    sys.stdout.flush()
+                    continue
+
+                s, port, ports = ensure_connected(preferred_port)
+                if s is None:
+                    sys.stdout.write(json.dumps({"id": req_id, "data": None, "port": None, "ports": ports}) + "\n")
+                    sys.stdout.flush()
+                    continue
+
+                result = query_on_port(s, cmd, timeout)
+                if result is None and port not in list_ports():
+                    # Port tercabut saat transaksi -> bersihkan dan coba port baru sekali
+                    close_quietly(ser)
+                    ser = None
+                    active_port = None
+                    s2, port2, ports2 = ensure_connected()
+                    if s2 is not None:
+                        result = query_on_port(s2, cmd, timeout)
+                        port = port2
+                        ports = ports2
+
+                sys.stdout.write(json.dumps({"id": req_id, "data": result, "port": port, "ports": ports}) + "\n")
+                sys.stdout.flush()
+            except Exception as exc:
                 close_quietly(ser)
                 ser = None
                 active_port = None
-                ports = list_ports()
-                candidates = ([preferred_port] if preferred_port in ports else []) + [p for p in ports if p != preferred_port]
-                found_data = None
-                for cand in candidates:
-                    try:
-                        s = open_port(cand)
-                        if s is None:
-                            continue
-                        res = query_on_port(s, "STATUS", 2.5)
-                        if res is not None:
-                            ser = s
-                            active_port = cand
-                            found_data = res
-                            break
-                        close_quietly(s)
-                    except Exception:
-                        pass
-                sys.stdout.write(
-                    json.dumps({"id": req_id, "data": found_data, "port": active_port, "ports": ports}) + "\n"
-                )
+                sys.stdout.write(json.dumps({"id": req_id, "data": None, "port": None, "ports": list_ports(), "error": str(exc)}) + "\n")
                 sys.stdout.flush()
-                continue
-
-            s, port, ports = ensure_connected(preferred_port)
-            if s is None:
-                sys.stdout.write(json.dumps({"id": req_id, "data": None, "port": None, "ports": ports}) + "\n")
-                sys.stdout.flush()
-                continue
-
-            result = query_on_port(s, cmd, timeout)
-            if result is None and port not in list_ports():
-                # Port tercabut saat transaksi -> bersihkan dan coba port baru sekali
-                close_quietly(ser)
-                ser = None
-                active_port = None
-                s2, port2, ports2 = ensure_connected()
-                if s2 is not None:
-                    result = query_on_port(s2, cmd, timeout)
-                    port = port2
-                    ports = ports2
-
-            sys.stdout.write(json.dumps({"id": req_id, "data": result, "port": port, "ports": ports}) + "\n")
-            sys.stdout.flush()
-        except Exception as exc:
-            close_quietly(ser)
-            ser = None
-            active_port = None
-            sys.stdout.write(json.dumps({"id": req_id, "data": None, "port": None, "ports": list_ports(), "error": str(exc)}) + "\n")
-            sys.stdout.flush()
+    finally:
+        close_quietly(ser)
+        ser = None
+        active_port = None
 
 
 if __name__ == "__main__":

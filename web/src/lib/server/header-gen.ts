@@ -1,4 +1,5 @@
 import { isLabel, type Label } from "@/lib/constants";
+import { fitScaler } from "@/lib/knn";
 import { getActiveDataset, getSettings } from "./core";
 import { store } from "./store";
 
@@ -15,6 +16,7 @@ const CODE_PREFIX: Record<Label, string> = {
 };
 
 const fmtF = (n: number) => `${n.toFixed(2)}f`;
+const fmtF6 = (n: number) => `${n.toFixed(6)}f`;
 
 export async function buildDatasetHeader(): Promise<{
   content: string;
@@ -42,12 +44,7 @@ export async function buildDatasetHeader(): Promise<{
     throw new Error("Dataset latih masih kosong. Ambil atau isi data latih terlebih dahulu.");
   }
 
-  const rMin = Math.min(...train.map((x) => x.r));
-  const rMax = Math.max(...train.map((x) => x.r));
-  const gMin = Math.min(...train.map((x) => x.g));
-  const gMax = Math.max(...train.map((x) => x.g));
-  const bMin = Math.min(...train.map((x) => x.b));
-  const bMax = Math.max(...train.map((x) => x.b));
+  const mm = fitScaler(train, "minmax");
 
   const formatRows = (list: typeof train, splitCode: "TRN" | "TST") => {
     const counters: Record<Label, number> = { segar: 0, mulai_membusuk: 0, busuk: 0 };
@@ -74,6 +71,7 @@ export async function buildDatasetHeader(): Promise<{
 // Dataset latih: ${train.length} sampel, Dataset uji: ${test.length} sampel
 #define NUM_TRAIN_SAMPLES ${train.length}
 #define NUM_TEST_SAMPLES ${testCount}
+#define NUM_FEATURES 4
 #define KNN_K ${settings.defaultK}
 
 struct SampleRGB {
@@ -83,12 +81,8 @@ struct SampleRGB {
   uint8_t class_id;
 };
 
-float MINMAX_R_MIN = ${fmtF(rMin)};
-float MINMAX_R_MAX = ${fmtF(rMax)};
-float MINMAX_G_MIN = ${fmtF(gMin)};
-float MINMAX_G_MAX = ${fmtF(gMax)};
-float MINMAX_B_MIN = ${fmtF(bMin)};
-float MINMAX_B_MAX = ${fmtF(bMax)};
+float MINMAX_F_MIN[NUM_FEATURES] = { ${mm.min.map(fmtF6).join(", ")} };
+float MINMAX_F_MAX[NUM_FEATURES] = { ${mm.max.map(fmtF6).join(", ")} };
 
 SampleRGB trainDataRaw[NUM_TRAIN_SAMPLES] = {
 ${formatRows(train, "TRN")}

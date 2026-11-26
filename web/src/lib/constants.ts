@@ -74,7 +74,7 @@ export const SCALING_INFO: Record<Scaling, ScalingMeta> = {
     formula: "x' = x",
     color: "#a8968f",
     textColor: "var(--scaling-none-text)",
-    desc: "Nilai RGB mentah (0 sampai 255) langsung dipakai untuk menghitung jarak.",
+    desc: "Fitur mentah (r, g, b ∈ [0, 1] dan L ∈ [0, 255]) langsung dipakai tanpa penyetaraan skala, sehingga kecerahan L mendominasi jarak Euclidean.",
   },
   minmax: {
     name: "Min-Max",
@@ -82,7 +82,7 @@ export const SCALING_INFO: Record<Scaling, ScalingMeta> = {
     formula: "x' = (x - min) / (max - min)",
     color: "#e5383b",
     textColor: "var(--scaling-minmax-text)",
-    desc: "Skalakan tiap kanal R, G, dan B ke rentang 0 sampai 1 dari nilai minimum dan maksimum data latih.",
+    desc: "Skalakan keempat fitur (r = R/Σ, g = G/Σ, b = B/Σ, L = (R+G+B)/3) ke rentang 0–1 agar kromatisitas dan kecerahan L setara pada jarak Euclidean.",
   },
   zscore: {
     name: "Z-Score",
@@ -90,7 +90,7 @@ export const SCALING_INFO: Record<Scaling, ScalingMeta> = {
     formula: "x' = (x - mean) / std",
     color: "#f4a261",
     textColor: "var(--scaling-zscore-text)",
-    desc: "Standarkan tiap kanal agar rata-rata 0 dan simpangan baku 1 berdasarkan data latih.",
+    desc: "Standarkan keempat fitur (r = R/Σ, g = G/Σ, b = B/Σ, L = (R+G+B)/3) agar rata-rata 0 dan simpangan baku 1 sehingga L tidak mendominasi.",
   },
 };
 

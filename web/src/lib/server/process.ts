@@ -258,9 +258,9 @@ export function simulateReading(label: Label) {
 
 function simTiming(method: Scaling, n: number, k: number) {
   const j = () => 1 + (Math.random() - 0.5) * 0.08;
-  const knnUs = (n * 0.47 + k * 0.6 + 7.5) * j();
-  const scaleUs = method === "none" ? 0.9 * j() : (n * 3 * (method === "zscore" ? 0.128 : 0.121) + 5.5) * j();
-  const memBytes = 8 + k * 8 + (method === "none" ? 0 : 8 + n * 12);
+  const knnUs = (n * 0.58 + k * 0.6 + 7.5) * j();
+  const scaleUs = method === "none" ? 0.9 * j() : (n * 4 * (method === "zscore" ? 0.128 : 0.121) + 5.5) * j();
+  const memBytes = 8 + k * 8 + (method === "none" ? 0 : 8 + n * 16);
   return { knnUs: round2(knnUs), scaleUs: round2(scaleUs), execUs: round2(knnUs + scaleUs), memBytes };
 }
 
@@ -305,7 +305,7 @@ export async function simulateCommand(cmd: DeviceCommand): Promise<void> {
           scaleUs: t.scaleUs,
           knnUs: t.knnUs,
           memBytes: t.memBytes,
-          modelBytes: train.length * 16,
+          modelBytes: train.length * 20,
           freeHeap: simHeap(),
           trainCount: train.length,
           actual: truth,
@@ -349,7 +349,7 @@ export async function simulateCommand(cmd: DeviceCommand): Promise<void> {
             scaleUs: round2(sumScale / cnt),
             knnUs: round2(sumKnn / cnt),
             memBytes: mem,
-            modelBytes: train.length * 16,
+            modelBytes: train.length * 20,
           };
         });
         body = { commandId: cmd.id, type: "benchmark", k, repeat, cpuMhz: 240, freeHeap: simHeap(), trainCount: train.length, results };

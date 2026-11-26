@@ -1,10 +1,15 @@
 import { LABELS, SCALINGS, type Label, type Scaling } from "./constants";
 
 /**
- * Implementasi KNN + Feature Scaling.
- * Logika IDENTIK dengan firmware ESP32 (fit scaler dari data latih, jarak Euclidean,
+ * Implementasi KNN + Feature Scaling berbasis 4 fitur (r, g, b, L):
+ *   r = R / (R + G + B), g = G / (R + G + B), b = B / (R + G + B), L = (R + G + B) / 3
+ * Logika IDENTIK dengan firmware ESP32 (fit scaler dari data latih, jarak Euclidean 4D,
  * voting mayoritas, tie-break = kelas tetangga terdekat) sehingga akurasi server == akurasi alat.
  */
+
+export const FEATURE_COUNT = 4;
+export const FEATURE_NAMES = ["r (R/Σ)", "g (G/Σ)", "b (B/Σ)", "L (Rata2)"] as const;
+export type SurfaceWarning = "fat_or_membrane" | "too_dark" | null;
 
 export interface DataPoint {
   id?: number;
@@ -36,18 +41,32 @@ export interface Prediction {
   scaled: number[];
 }
 
-export const toVec = (p: { r: number; g: number; b: number }) => [p.r, p.g, p.b];
+/** Ekstrak vektor 4 fitur [r_chr, g_chr, b_chr, L] dari nilai RGB kalibrasi */
+export function toVec(p: { r: number; g: number; b: number }): [number, number, number, number] {
+  const sum = p.r + p.g + p.b;
+  if (sum <= 1e-4) return [0, 0, 0, 0];
+  return [p.r / sum, p.g / sum, p.b / sum, sum / 3];
+}
+
+/** Deteksi non-blocking indikasi permukaan lemak/membran putih/silau atau sensor terlalu gelap */
+export function detectSurfaceWarning(p: { r: number; g: number; b: number }): SurfaceWarning {
+  const [rc, , , L] = toVec(p);
+  if (L < 8) return "too_dark";
+  if (L >= 110 && rc < 0.385) return "fat_or_membrane";
+  return null;
+}
 
 /** Fit: hitung parameter scaling (min, max, mean, std populasi) dari data latih */
 export function fitScaler(train: Array<{ r: number; g: number; b: number }>, method: Scaling): ScalerParams {
   const n = train.length;
-  const min = [0, 0, 0];
-  const max = [0, 0, 0];
-  const mean = [0, 0, 0];
-  const std = [0, 0, 0];
+  const min = new Array<number>(FEATURE_COUNT).fill(0);
+  const max = new Array<number>(FEATURE_COUNT).fill(0);
+  const mean = new Array<number>(FEATURE_COUNT).fill(0);
+  const std = new Array<number>(FEATURE_COUNT).fill(0);
   if (n === 0) return { method, min, max, mean, std };
-  for (let j = 0; j < 3; j++) {
-    const col = train.map((p) => toVec(p)[j]);
+  const vecs = train.map((p) => toVec(p));
+  for (let j = 0; j < FEATURE_COUNT; j++) {
+    const col = vecs.map((v) => v[j]);
     min[j] = Math.min(...col);
     max[j] = Math.max(...col);
     mean[j] = col.reduce((a, b) => a + b, 0) / n;

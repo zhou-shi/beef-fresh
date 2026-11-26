@@ -1,5 +1,5 @@
 import { isLabel } from "@/lib/constants";
-import { fitScaler, scaleVec } from "@/lib/knn";
+import { fitScaler, scaleVec, toVec } from "@/lib/knn";
 import { errorMessage, getActiveDataset, getSettings } from "@/lib/server/core";
 import { store } from "@/lib/server/store";
 
@@ -23,17 +23,20 @@ export async function GET() {
     const zs = fitScaler(train, "zscore");
     const header = [
       "id", "split", "label", "r", "g", "b",
-      "r_minmax", "g_minmax", "b_minmax", "r_zscore", "g_zscore", "b_zscore",
+      "r_chr", "g_chr", "b_chr", "L",
+      "r_chr_minmax", "g_chr_minmax", "b_chr_minmax", "L_minmax",
+      "r_chr_zscore", "g_chr_zscore", "b_chr_zscore", "L_zscore",
       "raw_r", "raw_g", "raw_b", "raw_c", "lux", "color_temp", "source", "device_id", "created_at",
     ];
     const lines = [header.join(",")];
     for (const r of rows) {
-      const v = [r.r, r.g, r.b];
+      const v = toVec(r);
+      const rawFeat = v.map((x, idx) => x.toFixed(idx < 3 ? 6 : 2));
       const a = scaleVec(v, mm).map((x) => x.toFixed(6));
       const z = scaleVec(v, zs).map((x) => x.toFixed(6));
       lines.push(
         [
-          r.id, r.split, r.label, r.r, r.g, r.b, ...a, ...z,
+          r.id, r.split, r.label, r.r, r.g, r.b, ...rawFeat, ...a, ...z,
           r.rawR ?? "", r.rawG ?? "", r.rawB ?? "", r.rawC ?? "", r.lux ?? "", r.colorTemp ?? "",
           r.source, r.deviceId ?? "", r.createdAt.toISOString(),
         ].join(","),

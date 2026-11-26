@@ -63,6 +63,7 @@ const char* FW_VERSION    = "1.0.0";
 #define MAX_TRAIN     200
 #define MAX_TEST      60
 #define NUM_CLASSES   3
+#define NUM_FEATURES  4
 #define MAX_K         25
 
 // ------------------------------- OBJEK & TIPE --------------------------------
@@ -73,14 +74,14 @@ enum ScalingMethod : uint8_t { SC_NONE = 0, SC_MINMAX = 1, SC_ZSCORE = 2 };
 const char* SCALING_KEYS[3] = { "none", "minmax", "zscore" };
 const char* CLASS_KEYS[NUM_CLASSES] = { "segar", "mulai_membusuk", "busuk" };
 
-struct Sample   { float f[3]; uint8_t label; };
+struct Sample   { float f[NUM_FEATURES]; uint8_t label; };
 struct Neighbor { float d; uint8_t label; };
 
 struct KnnResult {
   uint8_t  label;
   uint8_t  votes[NUM_CLASSES];
   float    nearest;
-  float    scaled[3];
+  float    scaled[NUM_FEATURES];
   uint32_t scaleUs;   // waktu tahap feature scaling
   uint32_t knnUs;     // waktu tahap KNN (jarak + seleksi K + voting)
   uint32_t execUs;    // total waktu eksekusi
@@ -95,7 +96,7 @@ int  trainCount = 0;
 int  testCount  = 0;
 long modelVersion = -1;
 long serverModelVersion = -1;
-float fMin[3], fMax[3], fMean[3], fStd[3];
+float fMin[NUM_FEATURES], fMax[NUM_FEATURES], fMean[NUM_FEATURES], fStd[NUM_FEATURES];
 
 bool sensorOk = false;
 bool oledOk   = false;
@@ -105,9 +106,10 @@ unsigned long lastPoll = 0;
 void oledShow(const String& title, const String& l1 = "", const String& l2 = "", const String& l3 = "");
 void oledResult(uint8_t label, const float rgb[3], uint32_t execUs);
 bool readColor(Reading& out);
+void extractFeatures(const float rgb[3], float out[NUM_FEATURES]);
 void computeScaler();
 static float scaleValue(float x, int j, ScalingMethod m);
-bool runKnn(const float rgb[3], ScalingMethod m, int k, KnnResult& res);
+bool runKnn(const float feat[NUM_FEATURES], ScalingMethod m, int k, KnnResult& res);
 bool parseRow(const char* p, float out[3], int& lab);
 bool parseModel(const String& text);
 bool syncModel();
@@ -183,27 +185,40 @@ bool readColor(Reading& out) {
 }
 
 // ------------------------------- FEATURE SCALING -----------------------------
+// Ekstraksi 4 fitur: r = R/sum, g = G/sum, b = B/sum, L = sum/3
+void extractFeatures(const float rgb[3], float out[NUM_FEATURES]) {
+  float sum = rgb[0] + rgb[1] + rgb[2];
+  if (sum <= 0.0001f) {
+    for (int j = 0; j < NUM_FEATURES; j++) out[j] = 0.0f;
+    return;
+  }
+  out[0] = rgb[0] / sum;
+  out[1] = rgb[1] / sum;
+  out[2] = rgb[2] / sum;
+  out[3] = sum / 3.0f;
+}
+
 // FIT: parameter dihitung dari data latih (identik dengan perhitungan di server)
 void computeScaler() {
-  for (int j = 0; j < 3; j++) { fMin[j] = 0; fMax[j] = 0; fMean[j] = 0; fStd[j] = 0; }
+  for (int j = 0; j < NUM_FEATURES; j++) { fMin[j] = 0; fMax[j] = 0; fMean[j] = 0; fStd[j] = 0; }
   if (trainCount <= 0) return;
-  for (int j = 0; j < 3; j++) { fMin[j] = trainSet[0].f[j]; fMax[j] = trainSet[0].f[j]; }
+  for (int j = 0; j < NUM_FEATURES; j++) { fMin[j] = trainSet[0].f[j]; fMax[j] = trainSet[0].f[j]; }
   for (int i = 0; i < trainCount; i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < NUM_FEATURES; j++) {
       float x = trainSet[i].f[j];
       if (x < fMin[j]) fMin[j] = x;
       if (x > fMax[j]) fMax[j] = x;
       fMean[j] += x;
     }
   }
-  for (int j = 0; j < 3; j++) fMean[j] /= (float)trainCount;
+  for (int j = 0; j < NUM_FEATURES; j++) fMean[j] /= (float)trainCount;
   for (int i = 0; i < trainCount; i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < NUM_FEATURES; j++) {
       float d = trainSet[i].f[j] - fMean[j];
       fStd[j] += d * d;
     }
   }
-  for (int j = 0; j < 3; j++) fStd[j] = sqrtf(fStd[j] / (float)trainCount);
+  for (int j = 0; j < NUM_FEATURES; j++) fStd[j] = sqrtf(fStd[j] / (float)trainCount);
 }
 
 // TRANSFORM
@@ -219,7 +234,7 @@ static float scaleValue(float x, int j, ScalingMethod m) {
 }
 
 // ------------------------------- KNN -----------------------------------------
-bool runKnn(const float rgb[3], ScalingMethod m, int k, KnnResult& res) {
+bool runKnn(const float feat[NUM_FEATURES], ScalingMethod m, int k, KnnResult& res) {
   if (trainCount <= 0) return false;
   if (k < 1) k = 1;
   if (k > MAX_K) k = MAX_K;
@@ -231,27 +246,29 @@ bool runKnn(const float rgb[3], ScalingMethod m, int k, KnnResult& res) {
   // Tahap 1: feature scaling (salinan data latih terskala + data baru)
   float* scaled = nullptr;
   if (m != SC_NONE) {
-    scaled = (float*)malloc(sizeof(float) * 3 * trainCount);
+    scaled = (float*)malloc(sizeof(float) * NUM_FEATURES * trainCount);
     if (!scaled) return false;
     for (int i = 0; i < trainCount; i++) {
-      for (int j = 0; j < 3; j++) scaled[i * 3 + j] = scaleValue(trainSet[i].f[j], j, m);
+      for (int j = 0; j < NUM_FEATURES; j++) scaled[i * NUM_FEATURES + j] = scaleValue(trainSet[i].f[j], j, m);
     }
   }
-  float q[3];
-  for (int j = 0; j < 3; j++) q[j] = scaleValue(rgb[j], j, m);
+  float q[NUM_FEATURES];
+  for (int j = 0; j < NUM_FEATURES; j++) q[j] = scaleValue(feat[j], j, m);
   uint32_t t1 = micros();
 
-  // Tahap 2: KNN — jarak Euclidean, simpan K tetangga terdekat (insertion), voting
+  // Tahap 2: KNN — jarak Euclidean 4D, simpan K tetangga terdekat (insertion), voting
   Neighbor* nb = (Neighbor*)malloc(sizeof(Neighbor) * k);
   if (!nb) { if (scaled) free(scaled); return false; }
   uint32_t heapPeak = ESP.getFreeHeap();
   int filled = 0;
   for (int i = 0; i < trainCount; i++) {
-    const float* x = scaled ? &scaled[i * 3] : trainSet[i].f;
-    float d0 = x[0] - q[0];
-    float d1 = x[1] - q[1];
-    float d2 = x[2] - q[2];
-    float d = sqrtf(d0 * d0 + d1 * d1 + d2 * d2);
+    const float* x = scaled ? &scaled[i * NUM_FEATURES] : trainSet[i].f;
+    float sq = 0.0f;
+    for (int j = 0; j < NUM_FEATURES; j++) {
+      float dj = x[j] - q[j];
+      sq += dj * dj;
+    }
+    float d = sqrtf(sq);
     int pos;
     if (filled < k) {
       pos = filled++;
@@ -284,7 +301,7 @@ bool runKnn(const float rgb[3], ScalingMethod m, int k, KnnResult& res) {
   res.label = best;
   for (int c = 0; c < NUM_CLASSES; c++) res.votes[c] = votes[c];
   res.nearest = filled > 0 ? nb[0].d : 0;
-  for (int j = 0; j < 3; j++) res.scaled[j] = q[j];
+  for (int j = 0; j < NUM_FEATURES; j++) res.scaled[j] = q[j];
   res.scaleUs = t1 - t0;
   res.knnUs = t2 - t1;
   res.execUs = t2 - t0;
@@ -326,11 +343,11 @@ bool parseModel(const String& text) {
       if (line[0] == 'V') {
         ver = strtol(line + 2, nullptr, 10);
       } else if (line[0] == 'T' && tc < MAX_TRAIN && parseRow(line + 2, v, lab)) {
-        memcpy(trainSet[tc].f, v, sizeof(v));
+        extractFeatures(v, trainSet[tc].f);
         trainSet[tc].label = (uint8_t)lab;
         tc++;
       } else if (line[0] == 'U' && uc < MAX_TEST && parseRow(line + 2, v, lab)) {
-        memcpy(testSet[uc].f, v, sizeof(v));
+        extractFeatures(v, testSet[uc].f);
         testSet[uc].label = (uint8_t)lab;
         uc++;
       }
@@ -521,8 +538,10 @@ void doClassify(long id, JsonVariant cmd) {
     oledShow("ERROR", "Sensor tidak", "terdeteksi");
     return;
   }
+  float qFeat[NUM_FEATURES];
+  extractFeatures(rd.rgb, qFeat);
   KnnResult res;
-  if (!runKnn(rd.rgb, m, k, res)) {
+  if (!runKnn(qFeat, m, k, res)) {
     d["error"] = "Memori tidak cukup untuk KNN";
     sendResult(d);
     return;
@@ -544,6 +563,7 @@ void doClassify(long id, JsonVariant cmd) {
   d["rNorm"] = res.scaled[0];
   d["gNorm"] = res.scaled[1];
   d["bNorm"] = res.scaled[2];
+  d["lNorm"] = res.scaled[3];
   d["execUs"] = res.execUs;
   d["scaleUs"] = res.scaleUs;
   d["knnUs"] = res.knnUs;

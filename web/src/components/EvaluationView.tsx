@@ -4,9 +4,9 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Fragment, useMemo, useState } from "react";
 import { Boxes, ChartColumn, ChartLine, Check, FlaskConical, Sigma, Table, Target, X } from "lucide-react";
-import { usePoll } from "@/lib/client";
+import { api, usePoll } from "@/lib/client";
 import { K_OPTIONS, LABELS, LABEL_INFO, SCALINGS, SCALING_INFO, SPLIT_INFO, fmtNum, fmtPct, type Scaling } from "@/lib/constants";
-import { fitScaler, scaleVec, type EvalResult } from "@/lib/knn";
+import { FEATURE_NAMES, fitScaler, scaleVec, toVec, type EvalResult } from "@/lib/knn";
 import type { EvaluationDTO, LiteOverview, SampleDTO } from "@/lib/types";
 import type { ScatterPoint } from "@/components/three/Scatter3D";
 import { AccuracyChart, KSweepChart, type AccuracyDatum } from "@/components/charts";
@@ -64,8 +64,9 @@ function ConfusionMatrix({ r }: { r: EvalResult }) {
 }
 
 export default function EvaluationView() {
-  const { data: lite } = usePoll<LiteOverview>("/api/overview?lite=1", 8000);
+  const { data: lite, refresh: refreshLite } = usePoll<LiteOverview>("/api/overview?lite=1", 8000);
   const [kSel, setKSel] = useState<number | null>(null);
+  const [savingK, setSavingK] = useState(false);
   const k = kSel ?? lite?.settings.defaultK ?? 5;
   const mv = lite?.settings.modelVersion;
   const { data: ev, loading } = usePoll<EvaluationDTO>(mv != null ? `/api/evaluation?k=${k}&v=${mv}` : null, 60000);
@@ -79,14 +80,18 @@ export default function EvaluationView() {
     if (!samples.length) return [];
     const params = methods?.[space]?.params ?? fitScaler(samples.filter((s) => s.split === "train"), space);
     const wrong = new Set((methods?.[space]?.predictions ?? []).filter((p) => !p.correct).map((p) => p.id));
-    return samples.map((s) => ({
-      id: s.id,
-      v: scaleVec([s.r, s.g, s.b], params) as [number, number, number],
-      color: LABEL_INFO[s.label]?.color ?? "#999",
-      test: s.split === "test",
-      wrong: s.split === "test" && wrong.has(s.id),
-      title: `#${s.id} ${LABEL_INFO[s.label]?.name} (${SPLIT_INFO[s.split]?.short}) RGB(${s.r.toFixed(0)}, ${s.g.toFixed(0)}, ${s.b.toFixed(0)})`,
-    }));
+    return samples.map((s) => {
+      const fv = toVec(s);
+      const sv = scaleVec(fv, params);
+      return {
+        id: s.id,
+        v: [sv[0], sv[1], sv[3]] as [number, number, number],
+        color: LABEL_INFO[s.label]?.color ?? "#999",
+        test: s.split === "test",
+        wrong: s.split === "test" && wrong.has(s.id),
+        title: `#${s.id} ${LABEL_INFO[s.label]?.name} (${SPLIT_INFO[s.split]?.short}) RGB(${s.r.toFixed(0)}, ${s.g.toFixed(0)}, ${s.b.toFixed(0)}) | r=${fv[0].toFixed(3)}, L=${fv[3].toFixed(1)}`,
+      };
+    });
   }, [ds, methods, space]);
 
   const accData: AccuracyDatum[] = methods
@@ -113,12 +118,30 @@ export default function EvaluationView() {
           </div>
           <h1 className="mt-2 text-2xl font-bold tracking-tight text-fat-50">Evaluasi Feature Scaling dan Akurasi KNN</h1>
           <p className="mt-1 max-w-3xl text-sm text-fat-300/70">
-            Parameter scaling dihitung dari data latih, lalu diterapkan ke data uji tanpa kebocoran data. KNN memakai jarak Euclidean dan suara terbanyak, identik dengan logika di firmware ESP32.
+            Nilai RGB sensor diekstrak menjadi 4 fitur (r = R/Σ, g = G/Σ, b = B/Σ, dan kecerahan L = Rata2) agar tahan variasi pencahayaan. Parameter scaling dihitung dari data latih tanpa kebocoran data, identik dengan firmware ESP32.
           </p>
         </div>
         <div className="shrink-0">
-          <div className="mb-1.5 text-[11px] uppercase tracking-wider text-fat-300/60">
+          <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px] uppercase tracking-wider text-fat-300/60">
             <MetaItems items={["Nilai K", loading && "Memuat"]} />
+            {lite?.settings && k !== lite.settings.defaultK && (
+              <button
+                type="button"
+                disabled={savingK}
+                onClick={async () => {
+                  setSavingK(true);
+                  try {
+                    await api("/api/settings", { method: "PUT", json: { defaultK: k } });
+                    await refreshLite();
+                  } finally {
+                    setSavingK(false);
+                  }
+                }}
+                className="rounded-md bg-beef-600/25 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-beef-200 ring-1 ring-beef-500/40 hover:bg-beef-600/40 disabled:opacity-50"
+              >
+                {savingK ? "Menyimpan..." : `Jadikan K=${k} Default`}
+              </button>
+            )}
           </div>
           <Segmented<number> value={k} onChange={setKSel} options={K_OPTIONS.map((x) => ({ value: x, label: String(x) }))} />
         </div>
@@ -196,7 +219,7 @@ export default function EvaluationView() {
 
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <Card
-              title="Visualisasi 3D Ruang Fitur RGB"
+              title="Visualisasi 3D Ruang Fitur (r, g, L)"
               subtitle={
                 <span className="inline-flex flex-wrap items-center gap-3">
                   <span className="inline-flex items-center gap-1.5">
@@ -218,7 +241,13 @@ export default function EvaluationView() {
                 {scatterPoints.length ? (
                   <Scatter3D
                     points={scatterPoints}
-                    axes={space === "none" ? ["R", "G", "B"] : space === "minmax" ? ["R (0-1)", "G (0-1)", "B (0-1)"] : ["R (z)", "G (z)", "B (z)"]}
+                    axes={
+                      space === "none"
+                        ? ["r (R/Σ)", "g (G/Σ)", "L (Rata2)"]
+                        : space === "minmax"
+                          ? ["r (0-1)", "g (0-1)", "L (0-1)"]
+                          : ["r (z)", "g (z)", "L (z)"]
+                    }
                   />
                 ) : (
                   <div className="grid h-full place-items-center text-sm text-fat-300/60">Memuat data</div>
@@ -241,7 +270,7 @@ export default function EvaluationView() {
                     <table className="data-table w-full text-left text-xs">
                       <thead>
                         <tr>
-                          <th>Kanal</th>
+                          <th>Fitur</th>
                           <th>Min</th>
                           <th>Max</th>
                           <th>Rata-rata</th>
@@ -249,39 +278,56 @@ export default function EvaluationView() {
                         </tr>
                       </thead>
                       <tbody>
-                        {["R", "G", "B"].map((ch, j) => (
-                          <tr key={ch}>
-                            <td className={cn("font-semibold", j === 0 ? "text-red-600 dark:text-red-400" : j === 1 ? "text-emerald-700 dark:text-emerald-400" : "text-blue-700 dark:text-blue-400")}>
-                              {ch}
-                            </td>
-                            <td className="font-mono">{fmtNum(mm.min[j])}</td>
-                            <td className="font-mono">{fmtNum(mm.max[j])}</td>
-                            <td className="font-mono">{fmtNum(zs.mean[j])}</td>
-                            <td className="font-mono">{fmtNum(zs.std[j])}</td>
-                          </tr>
-                        ))}
+                        {FEATURE_NAMES.map((ch, j) => {
+                          const dec = j < 3 ? 4 : 2;
+                          const cls =
+                            j === 0
+                              ? "text-red-600 dark:text-red-400"
+                              : j === 1
+                                ? "text-emerald-700 dark:text-emerald-400"
+                                : j === 2
+                                  ? "text-blue-700 dark:text-blue-400"
+                                  : "text-amber-600 dark:text-amber-400";
+                          return (
+                            <tr key={ch}>
+                              <td className={cn("font-semibold", cls)}>{ch}</td>
+                              <td className="font-mono">{fmtNum(mm.min[j], dec)}</td>
+                              <td className="font-mono">{fmtNum(mm.max[j], dec)}</td>
+                              <td className="font-mono">{fmtNum(zs.mean[j], dec)}</td>
+                              <td className="font-mono">{fmtNum(zs.std[j], dec)}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
-                  {example && (
-                    <div className="rounded-xl border border-line bg-black/25 p-3 font-mono text-[11.5px] leading-relaxed text-fat-200/85">
-                      <div className="mb-1 font-sans text-[11px] uppercase tracking-wider text-fat-300/55">Contoh perhitungan (data uji #{example.id})</div>
-                      <div>
-                        RGB asli = ({fmtNum(example.r)}, {fmtNum(example.g)}, {fmtNum(example.b)})
+                  {example && (() => {
+                    const exVec = toVec(example);
+                    const exMm = scaleVec(exVec, mm);
+                    const exZs = scaleVec(exVec, zs);
+                    return (
+                      <div className="rounded-xl border border-line bg-black/25 p-3 font-mono text-[11.5px] leading-relaxed text-fat-200/85">
+                        <div className="mb-1 font-sans text-[11px] uppercase tracking-wider text-fat-300/55">Contoh perhitungan (data uji #{example.id})</div>
+                        <div>
+                          RGB asli = ({fmtNum(example.r)}, {fmtNum(example.g)}, {fmtNum(example.b)})
+                        </div>
+                        <div>
+                          Fitur (r, g, b, L) = ({fmtNum(exVec[0], 4)}, {fmtNum(exVec[1], 4)}, {fmtNum(exVec[2], 4)}, {fmtNum(exVec[3], 2)})
+                        </div>
+                        <div style={{ color: SCALING_INFO.minmax.textColor }}>
+                          r<sub>minmax</sub> = ({fmtNum(exVec[0], 4)} - {fmtNum(mm.min[0], 4)}) / ({fmtNum(mm.max[0], 4)} - {fmtNum(mm.min[0], 4)}) ={" "}
+                          {fmtNum(exMm[0], 4)}
+                        </div>
+                        <div style={{ color: SCALING_INFO.zscore.textColor }}>
+                          r<sub>zscore</sub> = ({fmtNum(exVec[0], 4)} - {fmtNum(zs.mean[0], 4)}) / {fmtNum(zs.std[0], 4)} = {fmtNum(exZs[0], 4)}
+                        </div>
+                        <div className="mt-1 space-y-0.5 text-fat-300/60">
+                          <div>Vektor Min-Max = ({exMm.map((x) => fmtNum(x, 3)).join(", ")})</div>
+                          <div>Vektor Z-Score = ({exZs.map((x) => fmtNum(x, 3)).join(", ")})</div>
+                        </div>
                       </div>
-                      <div style={{ color: SCALING_INFO.minmax.textColor }}>
-                        R<sub>minmax</sub> = ({fmtNum(example.r)} - {fmtNum(mm.min[0])}) / ({fmtNum(mm.max[0])} - {fmtNum(mm.min[0])}) ={" "}
-                        {fmtNum(scaleVec([example.r, example.g, example.b], mm)[0], 4)}
-                      </div>
-                      <div style={{ color: SCALING_INFO.zscore.textColor }}>
-                        R<sub>zscore</sub> = ({fmtNum(example.r)} - {fmtNum(zs.mean[0])}) / {fmtNum(zs.std[0])} = {fmtNum(scaleVec([example.r, example.g, example.b], zs)[0], 4)}
-                      </div>
-                      <div className="mt-1 space-y-0.5 text-fat-300/60">
-                        <div>Vektor Min-Max = ({scaleVec([example.r, example.g, example.b], mm).map((x) => fmtNum(x, 3)).join(", ")})</div>
-                        <div>Vektor Z-Score = ({scaleVec([example.r, example.g, example.b], zs).map((x) => fmtNum(x, 3)).join(", ")})</div>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                   <div className="space-y-1.5 text-xs text-fat-300/70">
                     {SCALINGS.map((m) => (
                       <div key={m}>
