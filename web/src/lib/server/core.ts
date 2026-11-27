@@ -25,7 +25,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   simulation: false,
-  defaultK: 5,
+  defaultK: 3,
   defaultScaling: "minmax",
   modelVersion: 1,
   activeDatasetId: null,

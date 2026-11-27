@@ -612,7 +612,7 @@ export async function executeSerialCommand(cmd: DeviceCommand, isSim: boolean): 
     const accRaw = Number(res.acc_without_scaling ?? 0);
     const accScaled = Number(res.acc_with_minmax ?? 0);
 
-    const kVal = Number(res.k_value ?? 5);
+    const kVal = Number(res.k_value ?? 3);
     setLastOledLines([
       `BENCHMARK KNN (K=${kVal})`,
       `Tanpa   : ${accRaw.toFixed(1)}% (${res.correct_without_scaling ?? 0}/${testCount})`,

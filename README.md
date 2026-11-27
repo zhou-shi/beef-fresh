@@ -8,7 +8,7 @@
 [![Next.js](https://img.shields.io/badge/Web-Next.js%2016%20%7C%20React%2019%20%7C%20Three.js-111827?style=for-the-badge&logo=nextdotjs)](web/package.json)
 [![Database](https://img.shields.io/badge/Database-Supabase%20PostgreSQL-3ecf8e?style=for-the-badge&logo=supabase)](supabase/web_schema.sql)
 [![OS](https://img.shields.io/badge/OS-Ubuntu%2026.04%20%26%20Windows%2011-2563eb?style=for-the-badge)](web/src/lib/server/toolchain.ts)
-[![Accuracy](https://img.shields.io/badge/Akurasi%20Uji%20(Min--Max%20K%3D5)-100.0%25%20(36%2F36)-16a34a?style=for-the-badge)](#3-hasil-evaluasi-model-144-latih--36-uji)
+[![Accuracy](https://img.shields.io/badge/Akurasi%20Uji%20(Min--Max%20K%3D3)-94.4%25%20(34%2F36)-16a34a?style=for-the-badge)](#3-hasil-evaluasi-model-144-latih--36-uji)
 
 [Tampilan Website](#2-tampilan-website) · [Hasil Evaluasi](#3-hasil-evaluasi-model-144-latih--36-uji) · [Arsitektur & Hardware](#4-arsitektur-sistem--perangkat-keras) · [Struktur Proyek](#5-struktur-proyek) · [Instalasi & Menjalankan](#6-cara-instalasi--menjalankan)
 
@@ -84,14 +84,14 @@
 
 Evaluasi menggunakan dataset utama pada [`firmware/beef_fresh_esp32/dataset_model.h`](firmware/beef_fresh_esp32/dataset_model.h) (**144 data latih**: 48 per kelas; **36 data uji**: 12 per kelas) dengan 4 fitur `(r, g, b, L)`:
 
-| Metode Feature Scaling | Akurasi Uji `K=3` | Akurasi Uji `K=5` | Akurasi Uji `K=7` | Macro F1 (`K=5`) | 5-Fold CV (`K=5`) |
+| Metode Feature Scaling | Akurasi Uji `K=3` (Default) | Akurasi Uji `K=5` | Akurasi Uji `K=7` | Macro F1 (`K=5`) | 5-Fold CV (`K=5`) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Tanpa Scaling** | `55.6%` | `50.0%` | `58.3%` | `49.9%` | `58.3%` |
-| **Min-Max (0–1)** ⭐ | `94.4%` (`34/36`) | **`100.0%`** (`36/36`) | **`100.0%`** (`36/36`) | **`100.0%`** | **`93.1%`** |
+| **Tanpa Scaling** | `55.6%` (`20/36`) | `50.0%` | `58.3%` | `49.9%` | `58.3%` |
+| **Min-Max (0–1)** ⭐ | **`94.4%`** (`34/36`) | **`100.0%`** (`36/36`) | **`100.0%`** (`36/36`) | **`100.0%`** | **`93.1%`** |
 | **Z-Score** | `91.7%` (`33/36`) | `91.7%` (`33/36`) | `94.4%` (`34/36`) | `91.6%` | **`93.1%`** |
 
 > **Mengapa Feature Scaling sangat krusial pada 4 fitur `(r, g, b, L)`?**
-> Rentang nilai kecerahan $L$ (`10.88 – 146.86`) ratusan kali lebih lebar dibandingkan kromatisitas $r, g, b$ (`0.20 – 0.52`). Tanpa scaling, $L$ mendominasi jarak Euclidean sehingga akurasi jatuh ke `50.0%`. Dengan **Min-Max Scaling**, keempat fitur memiliki bobot seimbang `[0, 1]` dan akurasi melonjak menjadi **`100.0%` (`36/36`)** pada `K=5`.
+> Rentang nilai kecerahan $L$ (`10.88 – 146.86`) ratusan kali lebih lebar dibandingkan kromatisitas $r, g, b$ (`0.20 – 0.52`). Tanpa scaling, $L$ mendominasi jarak Euclidean sehingga akurasi hanya `55.6%` (`K=3`). Dengan **Min-Max Scaling**, keempat fitur memiliki bobot seimbang `[0, 1]` dan akurasi melonjak menjadi **`94.4%` (`34/36`)** pada default **`K=3`** (serta hingga **`100.0%`** pada `K=5`).
 
 **Footprint Kompilasi ESP32 (`esp32:esp32:esp32`)**:
 - **Program Storage (Flash)**: `962.052 bytes` (`73%` dari `1.310.720 bytes`)
@@ -146,7 +146,7 @@ beef-fresh/
 │   └── public/firmware/                   # Salinan firmware siap unduh dari halaman /perangkat
 ├── firmware/beef_fresh_esp32/             # Firmware utama ESP32 (USB Serial + NVS 2-Point Calibration)
 │   ├── beef_fresh_esp32.ino
-│   └── dataset_model.h                    # 144 data latih, 36 data uji, KNN_K=5, batas Min-Max 4 fitur
+│   └── dataset_model.h                    # 144 data latih, 36 data uji, KNN_K=3, batas Min-Max 4 fitur
 ├── cli/
 │   ├── serial_daemon.py                   # Daemon serial persisten (anti auto-reset & pelepasan port COM)
 │   └── beef_fresh_cli.py                  # CLI Python interaktif
@@ -191,5 +191,5 @@ npm run start:public
 
 Lalu buka **`http://localhost:3000`** di browser:
 1. Buka menu **`/perangkat`** → klik **Siapkan / Unduh Otomatis** (bila ada komponen toolchain yang belum terpasang) → colokkan ESP32 via USB → klik **Scan & Hubungkan Ulang**.
-2. Pastikan nilai default **`K = 5`** aktif (klik **Set Default K = 5** di `/perangkat` atau **Jadikan K=5 Default** di `/evaluasi`).
+2. Pastikan nilai default **`K = 3`** aktif (sudah menjadi bawaan di `/perangkat` dan `/evaluasi`).
 3. Klik **Tanam ke ESP32** untuk mengekspor `dataset_model.h`, mengompilasi, dan mengunggah firmware terbaru langsung ke papan ESP32.

@@ -519,7 +519,7 @@ void doCapture(long id, JsonVariant cmd) {
 
 void doClassify(long id, JsonVariant cmd) {
   String sc = cmd["scaling"] | "minmax";
-  int k = cmd["k"] | 5;
+  int k = cmd["k"] | 3;
   ScalingMethod m = parseScalingKey(sc);
   JsonDocument d;
   d["commandId"] = id;
@@ -577,7 +577,7 @@ void doClassify(long id, JsonVariant cmd) {
 }
 
 void doBenchmark(long id, JsonVariant cmd) {
-  int k = cmd["k"] | 5;
+  int k = cmd["k"] | 3;
   int repeat = cmd["repeat"] | 3;
   if (repeat < 1) repeat = 1;
   if (repeat > 10) repeat = 10;

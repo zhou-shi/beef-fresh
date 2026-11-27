@@ -302,7 +302,7 @@ function createInitialLocalStore(): LocalStoreData {
     devices: [],
     app_settings: [
       { key: "simulation", value: false },
-      { key: "defaultK", value: 5 },
+      { key: "defaultK", value: 3 },
       { key: "defaultScaling", value: "minmax" },
       { key: "modelVersion", value: 1 },
       { key: "activeDatasetId", value: 1 },

@@ -863,7 +863,7 @@ export default function Terminal({ overview, refreshOverview, setVisual, onView 
   }
 
   async function evaluation(kArg?: number) {
-    const k = clampK(kArg ?? ovRef.current?.settings.defaultK ?? 5);
+    const k = clampK(kArg ?? ovRef.current?.settings.defaultK ?? 3);
     startBusy(`Menghitung akurasi KNN (K=${k}) untuk 3 metode feature scaling`);
     try {
       const ev = await api<EvaluationDTO>(`/api/evaluation?k=${k}`);
@@ -1434,7 +1434,7 @@ export default function Terminal({ overview, refreshOverview, setVisual, onView 
         case "scan": {
           const s = ovRef.current?.settings;
           let scaling: Scaling = s?.defaultScaling ?? "minmax";
-          let k = s?.defaultK ?? 5;
+          let k = s?.defaultK ?? 3;
           for (const a of pos) {
             if (/^\d+$/.test(a)) k = clampK(Number(a));
             else {
@@ -1447,7 +1447,7 @@ export default function Terminal({ overview, refreshOverview, setVisual, onView 
         }
         case "benchmark":
         case "bench":
-          return await benchmark(pos[0] ? Number(pos[0]) : ovRef.current?.settings.defaultK ?? 5, pos[1] ? Number(pos[1]) : 3);
+          return await benchmark(pos[0] ? Number(pos[0]) : ovRef.current?.settings.defaultK ?? 3, pos[1] ? Number(pos[1]) : 3);
         case "evaluasi":
         case "eval":
         case "akurasi":

@@ -67,7 +67,7 @@ export default function EvaluationView() {
   const { data: lite, refresh: refreshLite } = usePoll<LiteOverview>("/api/overview?lite=1", 8000);
   const [kSel, setKSel] = useState<number | null>(null);
   const [savingK, setSavingK] = useState(false);
-  const k = kSel ?? lite?.settings.defaultK ?? 5;
+  const k = kSel ?? lite?.settings.defaultK ?? 3;
   const mv = lite?.settings.modelVersion;
   const { data: ev, loading } = usePoll<EvaluationDTO>(mv != null ? `/api/evaluation?k=${k}&v=${mv}` : null, 60000);
   const { data: ds } = usePoll<{ samples: SampleDTO[] }>(mv != null ? `/api/samples?limit=5000&v=${mv}` : null, 60000);

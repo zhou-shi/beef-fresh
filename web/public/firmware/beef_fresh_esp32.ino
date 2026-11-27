@@ -162,7 +162,7 @@ uint32_t rebuildScaledTrainingSet() {
   return (uint32_t)(t1 - t0);
 }
 
-// Algoritma KNN dinamis (K = 1..15, default KNN_K=5) di ESP32 pada ruang fitur 4D (r, g, b, L)
+// Algoritma KNN dinamis (K = 1..15, default KNN_K=3) di ESP32 pada ruang fitur 4D (r, g, b, L)
 KNNResult runKNN(const float q[NUM_FEATURES], const SampleFeature* dataset, int n_samples, int kVal = KNN_K) {
   KNNResult res;
   if (kVal < 1) kVal = 1;

@@ -191,10 +191,10 @@ export default function DeviceView() {
     }
   }
 
-  async function setOptimalK5() {
+  async function resetDefaultK3() {
     setKBusy(true);
     try {
-      await api("/api/settings", { method: "PUT", json: { defaultK: 5 } });
+      await api("/api/settings", { method: "PUT", json: { defaultK: 3 } });
       await refresh();
     } finally {
       setKBusy(false);
@@ -430,9 +430,9 @@ export default function DeviceView() {
               <Button size="sm" variant="outline" icon={<RefreshCw className={cn("h-3.5 w-3.5", tcLoading && "animate-spin")} />} loading={tcLoading} onClick={() => void refreshToolchain()}>
                 Cek Ulang
               </Button>
-              {ov?.settings && ov.settings.defaultK !== 5 && (
-                <Button size="sm" variant="soft" loading={kBusy} onClick={() => void setOptimalK5()}>
-                  Set Default K = 5 (Optimal 100%)
+              {ov?.settings && ov.settings.defaultK !== 3 && (
+                <Button size="sm" variant="soft" loading={kBusy} onClick={() => void resetDefaultK3()}>
+                  Set Default K = 3
                 </Button>
               )}
             </div>
@@ -718,7 +718,7 @@ export default function DeviceView() {
       <ConfirmDialog
         open={confirmDeploy}
         title="Tanam Model ke ESP32 Sekarang?"
-        description={`Dataset "${ov?.activeDataset?.name ?? "Aktif"}" (${ov?.counts.train.total ?? 0} data latih, ${ov?.counts.test.total ?? 0} data uji, K=${ov?.settings.defaultK ?? 5}) akan ditulis ke dataset_model.h lalu dikompilasi dan diunggah ke ESP32. Jika Arduino CLI, Core ESP32, atau library belum ada di laptop ini, sistem akan mengunduhnya otomatis terlebih dahulu.`}
+        description={`Dataset "${ov?.activeDataset?.name ?? "Aktif"}" (${ov?.counts.train.total ?? 0} data latih, ${ov?.counts.test.total ?? 0} data uji, K=${ov?.settings.defaultK ?? 3}) akan ditulis ke dataset_model.h lalu dikompilasi dan diunggah ke ESP32. Jika Arduino CLI, Core ESP32, atau library belum ada di laptop ini, sistem akan mengunduhnya otomatis terlebih dahulu.`}
         confirmLabel="Mulai Tanam ke ESP32"
         tone="beef"
         onConfirm={() => {

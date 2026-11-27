@@ -8,7 +8,7 @@
 #define NUM_TRAIN_SAMPLES 144
 #define NUM_TEST_SAMPLES 36
 #define NUM_FEATURES 4
-#define KNN_K 5
+#define KNN_K 3
 
 struct SampleRGB {
   float r;
