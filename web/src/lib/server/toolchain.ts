@@ -51,14 +51,14 @@ function getOsLabel(): string {
   return `Linux (${process.arch})`;
 }
 
-function testExecutable(cmd: string, args: string[]): string | null {
+function testExecutable(cmd: string, args: string[], timeoutMs = 15_000): string | null {
   try {
     const res = spawnSync(/*turbopackIgnore: true*/ cmd, args, {
       encoding: "utf-8",
-      timeout: 5000,
+      timeout: timeoutMs,
       windowsHide: true,
     });
-    if (res.status === 0) {
+    if (res.status === 0 && !res.error) {
       return `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trim();
     }
   } catch {
@@ -193,7 +193,7 @@ export async function checkToolchainStatus(): Promise<ToolchainStatus> {
 
     try {
       const { stdout } = await execFileAsync(/*turbopackIgnore: true*/ cliPath, ["core", "list", "--format", "json"], {
-        timeout: 15_000,
+        timeout: 25_000,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
       });
@@ -204,7 +204,7 @@ export async function checkToolchainStatus(): Promise<ToolchainStatus> {
 
     try {
       const { stdout } = await execFileAsync(/*turbopackIgnore: true*/ cliPath, ["lib", "list", "--format", "json"], {
-        timeout: 15_000,
+        timeout: 25_000,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
       });
@@ -355,8 +355,9 @@ function getArduinoCliDownloadSpec(): { url: string; ext: "zip" | "tar.gz"; binN
   };
   const archStr = archMap[process.arch] ?? "64bit";
   if (process.platform === "win32") {
+    const winArch = process.arch === "ia32" ? "32bit" : "64bit";
     return {
-      url: `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_${archStr}.zip`,
+      url: `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_${winArch}.zip`,
       ext: "zip",
       binName: "arduino-cli.exe",
     };
@@ -375,6 +376,54 @@ function getArduinoCliDownloadSpec(): { url: string; ext: "zip" | "tar.gz"; binN
   };
 }
 
+async function verifyBinaryWithRetry(binPath: string, onProgress?: ProgressFn): Promise<string> {
+  if (process.platform === "win32") {
+    await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", `Unblock-File -LiteralPath '${binPath.replace(/'/g, "''")}'`],
+      { timeout: 10_000, windowsHide: true },
+    ).catch(() => {});
+  }
+
+  if (!fs.existsSync(/*turbopackIgnore: true*/ binPath)) {
+    throw new Error(
+      `File arduino-cli tidak ditemukan setelah ekstrak di ${binPath} (kemungkinan diblokir atau dikarantina antivirus/Windows Defender).`,
+    );
+  }
+
+  let lastErr = "tidak diketahui";
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await execFileAsync(/*turbopackIgnore: true*/ binPath, ["version"], {
+        timeout: 25_000,
+        windowsHide: true,
+      });
+      return binPath;
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string; signal?: string };
+      const parts = [
+        e.code ? `code=${e.code}` : "",
+        e.signal ? `signal=${e.signal}` : "",
+        e.stderr?.trim() || e.message,
+      ].filter(Boolean);
+      lastErr = parts.join(", ").slice(0, 180);
+      if (attempt < 4) {
+        onProgress?.({
+          step: 1,
+          percent: 15,
+          message: "Memverifikasi Arduino CLI...",
+          detail: `Menunggu pemindaian Windows Defender / coba ulang (${attempt}/3)...`,
+        });
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+  }
+
+  throw new Error(
+    `Arduino CLI gagal dijalankan di ${binPath} (${lastErr}). Jika diblokir Windows Defender, jalankan "winget install ArduinoSA.CLI" di PowerShell lalu restart server.`,
+  );
+}
+
 export async function ensureArduinoCli(onProgress?: ProgressFn): Promise<string> {
   const existing = findArduinoCliPath();
   if (existing) {
@@ -386,6 +435,15 @@ export async function ensureArduinoCli(onProgress?: ProgressFn): Promise<string>
   fs.mkdirSync(/*turbopackIgnore: true*/ ARDUINO_CLI_DIR, { recursive: true });
   const archivePath = path.join(ARDUINO_CLI_DIR, `arduino-cli.${spec.ext}`);
   const targetBin = path.join(ARDUINO_CLI_DIR, spec.binName);
+
+  if (fs.existsSync(/*turbopackIgnore: true*/ targetBin)) {
+    try {
+      onProgress?.({ step: 1, percent: 12, message: "Memverifikasi Arduino CLI lokal yang sudah ada...", detail: targetBin });
+      return await verifyBinaryWithRetry(targetBin, onProgress);
+    } catch {
+      // jika file lama rusak, lanjut unduh ulang
+    }
+  }
 
   onProgress?.({ step: 1, percent: 8, message: "Mengunduh Arduino CLI resmi...", detail: spec.url });
   const res = await fetch(spec.url, { redirect: "follow" });
@@ -424,17 +482,13 @@ export async function ensureArduinoCli(onProgress?: ProgressFn): Promise<string>
     // abaikan
   }
 
-  const verified = findArduinoCliPath();
-  if (!verified) {
-    throw new Error(`Arduino CLI selesai diekstrak tetapi gagal dijalankan di ${targetBin}.`);
-  }
-  return verified;
+  return await verifyBinaryWithRetry(targetBin, onProgress);
 }
 
 export async function ensureEsp32Core(cliPath: string, onProgress?: ProgressFn): Promise<void> {
   try {
     const { stdout } = await execFileAsync(/*turbopackIgnore: true*/ cliPath, ["core", "list", "--format", "json"], {
-      timeout: 15_000,
+      timeout: 25_000,
       maxBuffer: 20 * 1024 * 1024,
       windowsHide: true,
     });
@@ -481,7 +535,7 @@ export async function ensureArduinoLibraries(cliPath: string, onProgress?: Progr
   const installed = new Map<string, string | null>();
   try {
     const { stdout } = await execFileAsync(/*turbopackIgnore: true*/ cliPath, ["lib", "list", "--format", "json"], {
-      timeout: 15_000,
+      timeout: 25_000,
       maxBuffer: 20 * 1024 * 1024,
       windowsHide: true,
     });
