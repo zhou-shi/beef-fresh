@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import type { NextRequest } from "next/server";
 import { promisify } from "util";
@@ -23,6 +24,7 @@ const execFileAsync = promisify(execFile);
 const ROOT_DIR = path.resolve(process.cwd(), "..");
 const FIRMWARE_DIR = path.join(ROOT_DIR, "firmware", "beef_fresh_esp32");
 const HEADER_PATH = path.join(FIRMWARE_DIR, "dataset_model.h");
+const BUILD_DIR = path.join(os.tmpdir(), "beef-fresh-esp32-build");
 
 /**
  * Endpoint streaming NDJSON lintas OS (Ubuntu Linux & Windows 11) untuk menanam
@@ -30,8 +32,8 @@ const HEADER_PATH = path.join(FIRMWARE_DIR, "dataset_model.h");
  *  1. Pastikan arduino-cli, core esp32:esp32, library Adafruit, & PySerial tersedia (unduh otomatis jika belum ada)
  *  2. Generate dataset_model.h dari dataset aktif & deteksi port ESP32
  *  3. Lepas port serial agar tidak terkunci oleh daemon Python
- *  4. Compile firmware via arduino-cli
- *  5. Upload ke ESP32
+ *  4. Compile firmware via arduino-cli dengan cache persisten (--build-path)
+ *  5. Upload ke ESP32 dari --input-dir
  *  6. Sambungkan ulang koneksi serial & sinkronkan OLED
  */
 export async function POST(req: NextRequest) {
@@ -51,8 +53,10 @@ export async function POST(req: NextRequest) {
       };
 
       let targetPort: string | null = null;
+      let currentStep = 1;
       try {
         // Tahap 1: Cek & unduh otomatis dependency yang belum ada
+        currentStep = 1;
         send({ step: 1, percent: 5, message: "Memeriksa Arduino CLI, Core ESP32 & Library yang dibutuhkan..." });
         const { cliPath } = await ensureAllToolchain((ev) => {
           const pct = Math.min(42, Math.max(6, Math.round(ev.percent ?? 15)));
@@ -65,6 +69,7 @@ export async function POST(req: NextRequest) {
         });
 
         // Tahap 2: Buat file dataset_model.h & deteksi port ESP32
+        currentStep = 2;
         send({ step: 2, percent: 46, message: "Menyiapkan dataset_model.h dan mendeteksi port USB ESP32..." });
         const header = await buildDatasetHeader();
         fs.writeFileSync(/*turbopackIgnore: true*/ HEADER_PATH, header.content, "utf-8");
@@ -79,6 +84,7 @@ export async function POST(req: NextRequest) {
         }
 
         // Tahap 3: Lepas koneksi serial daemon sementara
+        currentStep = 3;
         send({
           step: 3,
           percent: 54,
@@ -87,33 +93,52 @@ export async function POST(req: NextRequest) {
         });
         await releaseSerialPortForFlashing();
 
-        // Tahap 4: Compile firmware ESP32
-        send({ step: 4, percent: 62, message: "Mengompilasi firmware ESP32 dengan model 4-fitur terbaru..." });
-        await spawnWithProgress(cliPath, ["compile", "--fqbn", ESP32_FQBN, FIRMWARE_DIR], {
-          timeoutMs: 300_000,
-          keepaliveLabel: "Sedang mengompilasi sketch ESP32...",
-          onDetail: (detail) =>
-            send({
-              step: 4,
-              percent: 72,
-              message: "Mengompilasi firmware ESP32 dengan model 4-fitur terbaru...",
-              detail,
-            }),
-        });
+        // Tahap 4: Compile firmware ESP32 (dengan build cache persisten agar cepat)
+        currentStep = 4;
+        fs.mkdirSync(/*turbopackIgnore: true*/ BUILD_DIR, { recursive: true });
+        const compileStartedAt = Date.now();
+        const compileMsg =
+          process.platform === "win32"
+            ? "Mengompilasi firmware ESP32 (kompilasi pertama di Windows membutuhkan beberapa menit)..."
+            : "Mengompilasi firmware ESP32 dengan model 4-fitur terbaru...";
+        send({ step: 4, percent: 62, message: compileMsg, detail: `Build cache: ${BUILD_DIR}` });
+        await spawnWithProgress(
+          cliPath,
+          ["compile", "--fqbn", ESP32_FQBN, "--jobs", "0", "--build-path", BUILD_DIR, FIRMWARE_DIR],
+          {
+            timeoutMs: 900_000,
+            keepaliveLabel: "Sedang mengompilasi sketch ESP32...",
+            onDetail: (detail) => {
+              const sec = Math.round((Date.now() - compileStartedAt) / 1000);
+              const text = detail === "Sedang mengompilasi sketch ESP32..." ? `${detail} (${sec} dtk)` : detail;
+              send({
+                step: 4,
+                percent: Math.min(78, 62 + Math.floor(sec / 20)),
+                message: compileMsg,
+                detail: text,
+              });
+            },
+          },
+        );
 
         // Tahap 5: Upload ke ESP32
+        currentStep = 5;
         send({ step: 5, percent: 82, message: `Mengunggah firmware & model ke memori flash ESP32 di ${targetPort}...` });
-        await spawnWithProgress(cliPath, ["upload", "-p", targetPort, "--fqbn", ESP32_FQBN, FIRMWARE_DIR], {
-          timeoutMs: 180_000,
-          keepaliveLabel: `Menulis memori flash ESP32 di ${targetPort}...`,
-          onDetail: (detail) =>
-            send({
-              step: 5,
-              percent: 88,
-              message: `Mengunggah firmware & model ke memori flash ESP32 di ${targetPort}...`,
-              detail,
-            }),
-        });
+        await spawnWithProgress(
+          cliPath,
+          ["upload", "-p", targetPort, "--fqbn", ESP32_FQBN, "--input-dir", BUILD_DIR, FIRMWARE_DIR],
+          {
+            timeoutMs: 180_000,
+            keepaliveLabel: `Menulis memori flash ESP32 di ${targetPort}...`,
+            onDetail: (detail) =>
+              send({
+                step: 5,
+                percent: 88,
+                message: `Mengunggah firmware & model ke memori flash ESP32 di ${targetPort}...`,
+                detail,
+              }),
+          },
+        );
 
         // Matikan HUPCL di Linux agar koneksi ulang tidak mereset ESP32
         if (process.platform === "linux") {
@@ -121,6 +146,7 @@ export async function POST(req: NextRequest) {
         }
 
         // Tahap 6: Sambungkan ulang serial & sinkronkan OLED
+        currentStep = 6;
         send({ step: 6, percent: 95, message: "Menyambungkan ulang ESP32 dan menyinkronkan layar OLED..." });
         setFlashingState(false);
         await new Promise((r) => setTimeout(r, 1200));
@@ -140,7 +166,7 @@ export async function POST(req: NextRequest) {
         }
         const msg = err instanceof Error ? err.message : String(err);
         send({
-          step: 0,
+          step: currentStep,
           percent: 100,
           done: true,
           ok: false,

@@ -58,7 +58,7 @@ export async function isSupabaseReady(): Promise<boolean> {
     const res = await fetch(`${env.url}/rest/v1/samples?select=id&limit=1`, {
       headers: { apikey: env.key, Authorization: `Bearer ${env.key}` },
       cache: "no-store",
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(10_000),
     });
     const ready = res.ok;
     supabaseReadyCache = { ready, checkedAt: Date.now() };
@@ -87,19 +87,45 @@ async function sbFetch<T>(table: string, query = "", init: RequestInit = {}): Pr
     "Content-Type": "application/json",
     ...(init.headers as Record<string, string> | undefined),
   };
-  const res = await fetch(`${env.url}/rest/v1/${table}${query}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-    signal: init.signal ?? AbortSignal.timeout(8_000),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Supabase ${table} HTTP ${res.status}: ${txt.slice(0, 160)}`);
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${env.url}/rest/v1/${table}${query}`, {
+        ...init,
+        headers,
+        cache: "no-store",
+        signal: init.signal ?? AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 600 * attempt));
+          continue;
+        }
+        throw new Error(`Supabase ${table} HTTP ${res.status}: ${txt.slice(0, 160)}`);
+      }
+      if (res.status === 204) return [] as unknown as T;
+      const text = await res.text();
+      return (text ? JSON.parse(text) : []) as T;
+    } catch (err) {
+      lastErr = err;
+      const name = err instanceof Error ? err.name : "";
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTransient =
+        name === "TimeoutError" ||
+        name === "AbortError" ||
+        msg.includes("fetch failed") ||
+        msg.includes("aborted due to timeout") ||
+        msg.includes("ECONNRESET") ||
+        msg.includes("ETIMEDOUT");
+      if (isTransient && attempt < 3) {
+        await new Promise((r) => setTimeout(r, 600 * attempt));
+        continue;
+      }
+      throw err;
+    }
   }
-  if (res.status === 204) return [] as unknown as T;
-  const text = await res.text();
-  return (text ? JSON.parse(text) : []) as T;
+  throw lastErr;
 }
 
 /* ---------- Konversi snake_case (Supabase) <-> camelCase (TS) ---------- */

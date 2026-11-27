@@ -180,12 +180,15 @@ export function DeployModal({ open, datasetLabel, port, onClose }: DeployModalPr
 
         <ol className="mt-4 space-y-2 rounded-xl border border-line bg-black/30 p-3.5 text-xs">
           {STEPS.map((s) => {
-            const isFinished = done ? ok : step > s.id;
+            const isFinished = done ? (ok ? true : s.id < step) : step > s.id;
+            const isFailed = done && !ok && s.id === step;
             const isCurrent = !done && step === s.id;
             return (
               <li key={s.id} className="flex items-center gap-2.5">
                 {isFinished ? (
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                ) : isFailed ? (
+                  <XCircle className="h-4 w-4 shrink-0 text-red-500 dark:text-red-400" />
                 ) : isCurrent ? (
                   <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-beef-600 dark:text-beef-300" />
                 ) : (
@@ -193,7 +196,13 @@ export function DeployModal({ open, datasetLabel, port, onClose }: DeployModalPr
                 )}
                 <span
                   className={cn(
-                    isFinished ? "text-emerald-700 dark:text-emerald-200/90" : isCurrent ? "font-semibold text-fat-50" : "text-fat-300/55",
+                    isFinished
+                      ? "text-emerald-700 dark:text-emerald-200/90"
+                      : isFailed
+                        ? "font-semibold text-red-600 dark:text-red-300"
+                        : isCurrent
+                          ? "font-semibold text-fat-50"
+                          : "text-fat-300/55",
                   )}
                 >
                   {s.label}
