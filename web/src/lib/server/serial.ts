@@ -233,6 +233,7 @@ export function listAvailableUsbPorts(): string[] {
         encoding: "utf-8",
         timeout: 2500,
         windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
       });
       const matches = out.match(/\bCOM\d+\b/gi) ?? [];
       const unique = Array.from(new Set(matches.map((m) => m.toUpperCase()))).sort((a, b) => {
